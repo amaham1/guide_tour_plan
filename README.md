@@ -1,46 +1,44 @@
 # Jeju Bus Guide Tour Plan
 
-제주 버스 기반 관광 일정 플래너입니다.  
-사용자가 장소 순서와 체류 시간을 정하면, 실데이터로 적재된 제주 버스 노선/시간표/보행 링크를 바탕으로 후보 일정을 계산하고, 선택한 후보를 실행 세션으로 추적할 수 있습니다.
+제주 버스 기반 관광 동선 플래너입니다.
 
-이 저장소는 샘플 데이터가 아니라 실제 ingest 파이프라인을 전제로 동작하도록 구성되어 있습니다.
+사용자가 장소 순서와 체류 시간을 정하면, 현재 적재된 정류장/노선/시간표/도보 링크 데이터를 바탕으로 버스 이동 후보를 계산하고, 실행 세션에서 현재/다음 이동을 확인할 수 있습니다.
 
-## 핵심 요약
+이 README는 현재 코드 기준으로 다시 정리한 문서입니다. 이름만 보면 OpenAPI 기반처럼 보이는 job도 있지만, 실제 구현은 아직 `bus.jeju.go.kr` 의존이 큰 부분이 있습니다. 아래 설명은 "의도"가 아니라 "지금 코드가 실제로 하는 일" 기준입니다.
 
-- Next.js App Router + Prisma + SQLite 기반 웹 앱입니다.
-- 장소 검색은 `Kakao Local API`를 사용합니다.
-- 버스 데이터는 `bus.jeju.go.kr` 기반 정류소, 노선 HTML, 시간표 데이터를 worker가 적재합니다.
-- 보행 링크는 OSRM을 이용해 계산하며, OSRM이 내려가 있으면 상세 원인과 함께 오류로 처리합니다.
-- 실시간 세션은 `data.go.kr` GNSS API를 사용할 수 있고, 현재 구현에서는 현재 ride leg 중심으로 지연을 반영합니다. 키가 없거나 매핑이 없으면 시간표 기준 fallback 으로 계속 동작합니다.
-- `/admin` 화면에서 ingest 실행과 적재 상태 검증이 가능합니다.
+## 현재 상태 요약
 
-## 현재 구현 범위
+- 웹 앱: Next.js 16 + React 19 + Prisma + SQLite
+- 기본 개발 포트: `5176`
+- 장소 검색: `Kakao Local API`만 사용
+- 버스 데이터: 현재 구현 기준으로 대부분 `bus.jeju.go.kr` HTML/JSON endpoint 기반
+- 도보 계산: `OSRM` 필수, 직선거리 fallback 없음
+- 실행 세션 실시간: `data.go.kr` GNSS + `vehicle-device-map`가 있을 때만 일부 반영
+- 관리자 화면: `/admin` (`ENABLE_INTERNAL_ADMIN=true` 필요)
+
+## 지금 제공하는 기능
 
 - 장소 검색
-  - `KAKAO_REST_API_KEY` 기반 카카오 장소 검색
-- 버스 플래너
+  - `GET /api/search?kind=place`
+  - Kakao Local keyword search만 사용
+- 정류장 검색
+  - `GET /api/search?kind=stop`
+  - 내부 `Stop` 테이블에서 검색
+  - 단, 활성 `RoutePattern` + `Trip`가 있는 정류장만 노출
+- 버스 동선 계산
   - `FASTEST`
   - `LEAST_WALK`
   - `LEAST_TRANSFER`
-- 실행 세션
-  - 현재 leg
-  - 다음 leg
+- 실행 세션 추적
+  - 현재 leg / 다음 leg 표시
   - 30초 polling
-  - 현재 ride leg 기준 GNSS 지연 반영 및 시간표 안내
+  - 현재 구현에서는 현재 ride leg일 때만 실시간 지연을 상태 DTO에 직접 반영
 - 관리자 화면
   - source catalog
   - ingest jobs / run history
-  - POI 연결 예외(사전 계산 walk-link 기준)
-  - route pattern 검토
-  - timetable / vehicle map 검토
-- 실데이터 ingest worker
-  - `stops`
-  - `stop-translations`
-  - `visit-jeju-places`
-  - `routes-html`
-  - `timetables-xlsx`
-  - `vehicle-device-map`
-  - `walk-links`
+  - POI join 예외
+  - route/timetable review
+  - vehicle map 통계
 
 ## 기술 스택
 
@@ -48,225 +46,536 @@
 - Web: Next.js 16, React 19
 - DB: Prisma + SQLite
 - Validation: Zod
-- Parsing: Cheerio, XLSX, csv-parse, fast-xml-parser
+- Parsing: Cheerio, XLSX, fast-xml-parser
 - Testing: Vitest
-- Routing support: OSRM
+- Walking graph: OSRM
 
 ## 화면 구성
 
 - `/`
   - `/planner`로 redirect
 - `/planner`
-  - 장소 검색, 방문 순서, 체류시간 입력
+  - 장소 검색, 방문 순서, 체류 시간 입력
 - `/planner/results/[planId]`
-  - 후보 3종과 경고 확인
+  - 후보 3종 확인
 - `/planner/execute/[sessionId]`
-  - 실행 세션 타임라인, 현재/다음 leg, 실시간 적용 여부
+  - 실행 세션 추적, 현재/다음 leg, 실시간 적용 여부 표시
 - `/admin`
   - 내부 운영용 ingest / 검증 화면
-  - `ENABLE_INTERNAL_ADMIN=true`일 때만 노출
-
-## 공개 API
-
-- `GET /api/search?kind=place|stop&q=&limit=`
-- `POST /api/planner/plan`
-- `POST /api/planner/session`
-- `GET /api/planner/session/[id]`
-- `POST /api/admin/ingest/run`
-  - 내부 관리자 전용
+  - `ENABLE_INTERNAL_ADMIN=true`일 때만 접근 가능
 
 ## 아키텍처 개요
 
 ```mermaid
 flowchart LR
-  A["User Input<br/>places + dwell time"] --> B["/api/search"]
+  A["User input<br/>places + dwell time"] --> B["/api/search"]
   B --> C["Kakao Local API"]
-  A --> E["/api/planner/plan"]
-  E --> F["Dynamic place-to-stop linking"]
-  F --> G["Planner graph<br/>stops + stop-stop links + trips"]
-  G --> H["Candidate scoring"]
-  H --> I["PlanCandidate"]
-  I --> J["/planner/results/[planId]"]
-  J --> K["/api/planner/session"]
-  K --> L["ExecutionSession"]
-  L --> M["/api/planner/session/[id]"]
-  M --> N["data.go.kr GNSS"]
+  A --> D["/api/planner/plan"]
+  D --> E["Dynamic place-to-stop linking<br/>OSRM only"]
+  E --> F["Planner graph<br/>stops + stop-stop links + patterns + trips"]
+  F --> G["Candidate scoring"]
+  G --> H["PlanCandidate"]
+  H --> I["/planner/results/[planId]"]
+  I --> J["/api/planner/session"]
+  J --> K["ExecutionSession"]
+  K --> L["/api/planner/session/[id]"]
+  L --> M["GNSS realtime<br/>optional"]
 ```
 
-## 데이터 흐름
+## 데이터 원천과 실제 사용 방식
 
 ### 1. 장소 검색
 
-- `GET /api/search`의 `kind=place`는 Kakao Local keyword search로 동작합니다.
-- 현재 구현에서는 `GET /api/search`와 `POST /api/planner/plan` 모두 planner catalog readiness를 공통으로 검사합니다.
-- `KAKAO_REST_API_KEY`가 필요합니다.
-- 저장된 장소(`mode: "stored"`)와 외부 장소(`mode: "external"`)를 모두 플래너 입력으로 받을 수 있습니다.
+- 현재 플래너의 장소 검색은 `KAKAO_REST_API_KEY` 기반 `Kakao Local API`만 사용합니다.
+- `visit-jeju-places` job은 장소 콘텐츠 적재용이며, `/api/search?kind=place`의 fallback으로 사용되지 않습니다.
 
-### 2. 플래너 입력 처리
+### 2. 정류장/노선/패턴/시간표
 
-- `POST /api/planner/plan`은 최대 5개 장소를 받습니다.
-- 장소별 체류 시간은 10분~240분입니다.
-- 중복 장소는 저장형/외부형 모두 dedupe 합니다.
-- 저장된 장소는 `Place`를 참조하고, 외부 검색 결과는 위경도 snapshot을 `PlanQueryPlace`에 함께 저장합니다.
+현재 코드상 핵심 transit ingest는 이름과 달리 아직 `bus.jeju.go.kr` 의존이 큽니다.
 
-### 3. 장소 -> 정류소 연결
+- `stops`
+  - 기본적으로 `bus.jeju.go.kr /data/search/stationListByBounds`
+  - 응답을 Station2 유사 구조로 정규화
+- `routes-openapi`
+  - 실제 구현은 `bus.jeju.go.kr /mobile/schedule/listSchedule` + `detailSchedule`
+  - 사용자 노선 마스터(`Route`) 생성
+- `route-patterns-openapi`
+  - 실제 구현은 `bus.jeju.go.kr /data/search/searchSimpleLineListByLineNumAndType`
+  - 그리고 `bus.jeju.go.kr /data/search/getLineInfoByLineId`
+  - 이 데이터로 `RoutePattern`, `RoutePatternStop` 생성
+- `routes-html`
+  - `bus.jeju.go.kr` schedule HTML을 읽어 authoritative pattern에 schedule source 매칭
+  - 현재는 `scheduleId + variantKey + routePatternId` 단위
+- `timetables-xlsx`
+  - schedule table을 읽어 `Trip`, `StopTime` 생성
+  - authoritative pattern sequence를 기준으로만 확장
 
-- 사용자가 고른 장소마다 요청 시점에 동적으로 근처 정류소를 다시 계산합니다.
-- 후보 정류소 계산 규칙
-  - 반경 우선: 1.8km 이내 정류소 우선
-  - 사전 후보: 최대 12개
-  - 최종 선택: 보행 시간 기준 상위 5개
-- 측정 방식
-  - OSRM 도보 경로만 사용
-  - OSRM 오류 시 plan API가 503과 상세 원인을 반환
+### 3. Jeju BIS OpenAPI
 
-주의:
+- `JEJU_OPEN_API_BASE_URL`, `JEJU_OPEN_API_SERVICE_KEY` 환경변수와 XML helper는 코드에 있습니다.
+- `worker/jobs/jeju-openapi.ts`에서 `StationRoute`, `Bus`, `BusArrives` 등을 직접 읽는 유틸리티도 있습니다.
+- 다만 현재 기본 planner ingest 파이프라인은 아직 이 OpenAPI를 핵심 소스로 쓰지 않습니다.
+- 즉 "OpenAPI helper는 존재하지만, 실제 기본 ingest는 bus.jeju 기반"이라고 이해하는 것이 정확합니다.
 
-- `walk-links` job은 `STOP_STOP` 전이 링크와 사전 계산용 링크를 적재합니다.
-- 실제 플래너는 사용자가 고른 장소에 대해서는 요청 시 동적으로 place-stop / stop-place 링크를 다시 계산합니다.
+### 4. 도보 경로
 
-### 4. 버스 그래프
+- 모든 도보 계산은 `OSRM`을 사용합니다.
+- OSRM 연결 실패 시 planner는 오류를 반환합니다.
+- 직선거리 fallback은 제거되었습니다.
 
-플래너가 읽는 핵심 그래프는 아래 테이블로 구성됩니다.
+### 5. 실시간
+
+- GNSS 조회: `data.go.kr`
+- device 매핑: `vehicle-device-map` job 결과 필요
+- 매핑이나 GNSS 조회가 실패하면 세션 API는 200을 유지하고 시간표 기준 안내로 남습니다.
+
+## 개발 환경 설정
+
+### 필수 준비
+
+1. 의존성 설치
+
+```bash
+npm install
+```
+
+2. 환경변수 파일 준비
+
+```bash
+copy .env.example .env
+```
+
+권장 최소 설정:
+
+- `DATABASE_URL`
+- `KAKAO_REST_API_KEY`
+- `ENABLE_INTERNAL_ADMIN=true` (선택)
+
+planner 품질에 직접 필요한 추가 설정:
+
+- `OSRM_BASE_URL`
+
+실시간까지 쓰려면:
+
+- `DATA_GO_KR_SERVICE_KEY`
+- `VEHICLE_MAP_SOURCE_URL`
+
+기타 override:
+
+- `BUS_STOPS_SOURCE_URL`
+- `STOP_TRANSLATIONS_XLSX_PATH`
+- `ROUTE_TIMETABLE_BASE_URL`
+- `VISIT_JEJU_BASE_URL`
+- `ROUTE_SEARCH_TERMS`
+- `JEJU_OPEN_API_BASE_URL`
+- `JEJU_OPEN_API_SERVICE_KEY`
+
+### 주요 환경변수
+
+| 변수 | 현재 코드 기준 의미 |
+| --- | --- |
+| `DATABASE_URL` | Prisma SQLite 연결 문자열 |
+| `KAKAO_REST_API_KEY` | 장소 검색 필수 |
+| `OSRM_BASE_URL` | OSRM foot routing base URL. 기본값 `http://localhost:5000` |
+| `ENABLE_INTERNAL_ADMIN` | `/admin` 접근 허용 |
+| `BUS_JEJU_BASE_URL` | `bus.jeju.go.kr` base URL |
+| `DATA_GO_KR_SERVICE_KEY` | GNSS realtime 조회용. `JEJU_OPEN_API_SERVICE_KEY` fallback alias 역할도 겸함 |
+| `JEJU_OPEN_API_BASE_URL` | Jeju BIS OpenAPI helper용 base URL |
+| `JEJU_OPEN_API_SERVICE_KEY` | Jeju BIS OpenAPI helper용 service key |
+| `BUS_STOPS_SOURCE_URL` | 정류장 소스 override |
+| `STOP_TRANSLATIONS_XLSX_PATH` | 정류장 번역 overlay 파일 경로 |
+| `ROUTE_TIMETABLE_BASE_URL` | 시간표 원본 override |
+| `VEHICLE_MAP_SOURCE_URL` | vehicle-device-map job용 매핑 원본 |
+| `VISIT_JEJU_BASE_URL` | VISIT JEJU 콘텐츠 ingest 원본 |
+| `ROUTE_SEARCH_TERMS` | route discovery 보강용 검색어 목록 |
+
+## 로컬 실행
+
+### 기본 실행
+
+```bash
+npm run dev
+```
+
+현재 `npm run dev`는 다음을 자동으로 수행합니다.
+
+1. Docker Compose 사용 가능 여부 확인
+2. Jeju OSRM dataset 준비
+3. OSRM 컨테이너 기동
+4. Next.js dev server를 `5176` 포트로 실행
+
+전제:
+
+- Docker Desktop / Docker Compose 필요
+- `5000`, `5176` 포트가 비어 있어야 함
+
+### 앱만 따로 실행
+
+```bash
+npm run dev:app -- --port 5176
+```
+
+이 경우에는 `OSRM_BASE_URL`이 가리키는 OSRM 서버가 이미 떠 있어야 planner가 동작합니다.
+
+### OSRM만 따로 실행/종료
+
+```bash
+npm run dev:osrm
+npm run dev:osrm:stop
+```
+
+### 운영 실행
+
+```bash
+npm run build
+npm run start
+```
+
+운영 기본 포트도 `5176`입니다.
+
+## Worker job 구조
+
+현재 등록된 job 순서는 아래와 같습니다.
+
+1. `stops`
+2. `stop-translations`
+3. `routes-openapi`
+4. `route-patterns-openapi`
+5. `routes-html`
+6. `timetables-xlsx`
+7. `walk-links`
+8. `vehicle-device-map`
+9. `transit-audit`
+10. `visit-jeju-places`
+
+CLI 사용 예시:
+
+```bash
+npm run worker -- --job stops
+npm run worker -- --job routes-html
+npm run worker:run-all
+```
+
+### planner를 위한 권장 최소 순서
+
+`/api/search`, `/api/planner/plan`을 실제로 쓰려면 아래 job이 준비되어야 합니다.
+
+1. `stops`
+2. `stop-translations` (선택, 없으면 no-op)
+3. `routes-openapi`
+4. `route-patterns-openapi`
+5. `routes-html`
+6. `timetables-xlsx`
+7. `walk-links`
+
+### 주의: `worker:run-all`
+
+- `worker:run-all`은 등록된 모든 job을 순서대로 실행합니다.
+- 따라서 optional job도 같이 실행됩니다.
+- 특히 `vehicle-device-map`는 `VEHICLE_MAP_SOURCE_URL`이 없으면 실패합니다.
+- 즉 최소 planner readiness만 필요하다면 위 권장 최소 순서를 수동으로 도는 편이 더 안전합니다.
+
+## planner readiness
+
+`GET /api/search`와 `POST /api/planner/plan`은 같은 readiness 체크를 사용합니다.
+
+현재 준비 완료 조건:
+
+- `stops`
+- `routes-openapi`
+- `route-patterns-openapi`
+- `routes-html`
+- `timetables-xlsx`
+- `walk-links`
+
+위 job들이 모두 한 번 이상 성공했고:
+
+- `stopCount > 0`
+- `routePatternCount > 0`
+- `tripCount > 0`
+- `walkLinkCount > 0`
+- `KAKAO_REST_API_KEY` 존재
+
+이면 ready입니다.
+
+중요한 점:
+
+- `visit-jeju-places`는 readiness에 필요하지 않습니다.
+- `vehicle-device-map`도 readiness에 필요하지 않습니다.
+- readiness 결과는 30초 캐시됩니다.
+
+## 공개 API
+
+### `GET /api/search`
+
+쿼리:
+
+- `kind`: `place | stop`
+- `q`: 검색어
+- `limit`: `1..20`, 기본 `8`
+
+예시:
+
+```http
+GET /api/search?kind=place&q=성산일출봉&limit=8
+GET /api/search?kind=stop&q=제주공항&limit=8
+```
+
+동작:
+
+- `kind=place`
+  - Kakao Local API만 호출
+- `kind=stop`
+  - 내부 `Stop` 테이블 검색
+  - 활성 `RoutePattern`과 `Trip`가 연결된 정류장만 반환
+
+### `POST /api/planner/plan`
+
+입력 조건:
+
+- 장소 수: `2..5`
+- 체류 시간: 각 장소당 `10..240분`
+- 중복 장소 선택 금지
+
+예시:
+
+```json
+{
+  "language": "ko",
+  "startAt": "2026-03-24T08:00:00.000Z",
+  "places": [
+    {
+      "mode": "external",
+      "displayName": "한림공원",
+      "latitude": 33.3897,
+      "longitude": 126.2399,
+      "regionName": "제주",
+      "categoryLabel": "관광명소",
+      "provider": "kakao",
+      "externalId": "11491281",
+      "dwellMinutes": 60
+    },
+    {
+      "mode": "external",
+      "displayName": "성산일출봉",
+      "latitude": 33.4589,
+      "longitude": 126.9425,
+      "regionName": "제주",
+      "categoryLabel": "관광명소",
+      "provider": "kakao",
+      "externalId": "11491438",
+      "dwellMinutes": 60
+    }
+  ]
+}
+```
+
+응답:
+
+- `planId`
+- 선택 장소 목록
+- 후보 최대 3종 (`FASTEST`, `LEAST_WALK`, `LEAST_TRANSFER`)
+- 각 후보의 `summary`, `legs`, `warnings`
+
+### `POST /api/planner/session`
+
+입력:
+
+```json
+{
+  "planCandidateId": "..."
+}
+```
+
+### `GET /api/planner/session/[id]`
+
+응답:
+
+- 현재 세션 상태
+- 현재 leg / 다음 leg
+- `realtimeApplied`
+- `delayMinutes`
+- `nextActionAt`
+- `replacementSuggested`
+
+### `POST /api/admin/ingest/run`
+
+내부 관리자 전용입니다.
+
+입력 예시:
+
+```json
+{
+  "jobKey": "routes-html"
+}
+```
+
+또는:
+
+```json
+{
+  "runAll": true
+}
+```
+
+## 동선 계산 로직
+
+### 입력 검증
+
+- 장소는 `2~5개`
+- 체류 시간은 `10~240분`
+- stored/external 모두 입력 가능
+- 동일 장소 중복 선택은 거부
+
+### 장소 -> 정류장 연결
+
+장소마다 요청 시점에 동적으로 nearby stop을 다시 계산합니다.
+
+현재 규칙:
+
+- 반경 우선: `3km`
+- 직선거리 prefilter: 상위 `24`
+- OSRM 실측 후 최종 유지: 상위 `12`
+- 접근 도보 허용 최대: `25분`
+- OSRM 경로가 없으면 해당 link는 버림
+- reachable stop이 하나도 없으면 planner는 오류
+
+즉, 현재 place-stop link는 미리 적재된 `PLACE_STOP`에 의존하지 않고 요청 시 재계산합니다.
+
+### planner graph
+
+planner가 실제로 쓰는 그래프는 아래 데이터만 포함합니다.
 
 - `Stop`
 - `WalkLink` 중 `STOP_STOP`
 - `RoutePattern`
 - `Trip`
 - `StopTime`
-- `VehicleDeviceMap`
+- `VehicleDeviceMap` (실시간 보강용)
 
-### 5. 후보 생성
+중요:
 
-플래너 엔진은 DFS 기반으로 일정 후보를 만들고, 점수 함수를 통해 3종 후보를 선택합니다.
+- `RoutePattern`이라도 `Trip`이 없으면 planner graph에 올라오지 않습니다.
+- 따라서 패턴은 있어도 시간표가 비어 있으면 실제 경로 계산에서는 사용되지 않습니다.
 
-현재 엔진의 중요한 제약은 아래와 같습니다.
+### 경로 탐색과 후보 생성
 
-- 장소별 접근 정류소 사용 수: 최대 5개
-- 장소-정류소 도보 허용치: 최대 25분
-- 세그먼트 탐색 창: 거리 기반 90~210분
-- 첫 탑승 buffer: 5분
-- 환승 buffer: 4분
-- 보간 stop time safety cost: 6분
-- 브랜치 상한: 40개
+현재 엔진은 round-based multi-transfer 탐색입니다.
 
-이 값들은 장거리 제주 이동에서 “버스가 있는데도 후보 없음”이 뜨지 않도록 조정되어 있습니다.
+주요 제약값:
 
-### 6. 경고 생성
+- access stop limit: `12`
+- place-stop walk limit: `25분`
+- search window: `90~210분`
+- segment option limit: `12`
+- partial당 확장 option limit: `8`
+- frontier limit: `72`
+- 최대 ride round: `5`
+- 첫 탑승 buffer: `5분`
+- 환승 buffer: `4분`
+- estimated stop time safety cost: `6분`
 
-후보마다 아래 경고가 붙을 수 있습니다.
+후보는 최종적으로 다음 3종을 선택합니다.
+
+- `FASTEST`
+- `LEAST_WALK`
+- `LEAST_TRANSFER`
+
+점수 함수는 아래 파일을 기준으로 합니다.
+
+- [`src/features/planner/scoring.ts`](/C:/Users/MMM/Desktop/development/grap/guide_tour_plan/src/features/planner/scoring.ts)
+
+현재 공식:
+
+- `FASTEST`
+  - `finalArrivalMinutes + transfers*12 + totalWalkMinutes*0.65 + safetyBufferCost + estimatedPenalty`
+- `LEAST_WALK`
+  - `totalWalkMinutes*10 + transfers*9 + finalArrivalMinutes*0.35 + safetyBufferCost + estimatedPenalty`
+- `LEAST_TRANSFER`
+  - `transfers*120 + totalWalkMinutes*3 + finalArrivalMinutes*0.5 + safetyBufferCost + estimatedPenalty`
+
+### 경고 생성
+
+후보별로 아래 경고가 붙을 수 있습니다.
 
 - `OPENING_HOURS_CONFLICT`
-  - 저장형 장소의 운영시간과 체류 구간이 충돌
 - `ESTIMATED_STOP_TIMES`
-  - 일부 stop time이 보간값
 - `REALTIME_UNAVAILABLE`
-  - 후보 전체에 실시간 적용 가능한 route pattern이 없음
 - `TRANSFER_REQUIRED`
-  - 환승 포함
 
-### 7. 실행 세션
+`REALTIME_UNAVAILABLE`의 현재 의미는 "후보 전체에 실시간 적용 가능한 패턴이 없음"에 더 가깝습니다.
 
-- `POST /api/planner/session`으로 후보를 세션으로 바꿉니다.
-- `/planner/execute/[sessionId]`는 30초마다 polling 합니다.
-- 실시간 반영 규칙
-  - `VehicleDeviceMap`이 있고
-  - `DATA_GO_KR_SERVICE_KEY`가 있고
-  - 현재 또는 다음 leg가 `ride`일 때
-  - `data.go.kr` GNSS를 호출해 지연분을 계산
-- 현재 구현에서는 현재 leg가 `ride`인 경우에만 지연분이 세션 상태에 직접 반영됩니다.
-- 실패 시에도 세션 API는 200 응답을 유지하고 시간표 기준 fallback 으로 안내합니다.
+## 실행 세션과 실시간
 
-## 데이터 소스
+- `/planner/execute/[sessionId]`는 30초마다 세션 API를 polling합니다.
+- 현재/다음 ride leg를 기준으로 실시간 조회 대상을 고릅니다.
+- 다만 최종 상태 DTO에 `realtimeApplied`, `delayMinutes`가 직접 반영되는 것은 현재 leg가 `ride`일 때뿐입니다.
 
-### 장소
+실시간 동작 전제:
 
-- 현재 플래너 장소 검색은 `Kakao Local API`를 사용합니다.
-- `VISIT_JEJU_BASE_URL`은 `visit-jeju-places` worker용 override 입니다.
+- `DATA_GO_KR_SERVICE_KEY`
+- `vehicle-device-map` 결과
+- 대상 `routePatternId`에 대응되는 device mapping
 
-### 정류소
+실패 시 동작:
 
-- 기본 적재원: `bus.jeju.go.kr /data/search/stationListByBounds`
-- 환경 override: `BUS_STOPS_SOURCE_URL`
+- 세션 API는 200을 유지
+- notice는 시간표 기준 안내로 남음
 
-### 정류소 번역
+## 관리자 화면
 
-- 기본 적재원: bus.jeju station multilingual fields
-- 환경 override: `STOP_TRANSLATIONS_XLSX_PATH`
-  - `.xlsx`
-  - `.xls`
-  - `.json`
+`/admin`에서는 현재 아래 정보를 볼 수 있습니다.
 
-### 노선 메타
+- Source Catalog
+- Ingest Jobs / Runs
+- POI Join Exceptions
+- Route Pattern Review
+- Timetable / Vehicle Map
 
-- 적재원: `bus.jeju.go.kr/mobile/schedule/listSchedule`
-- 상세: `detailSchedule?scheduleId=...`
+`ENABLE_INTERNAL_ADMIN=true`가 아니면 노출되지 않습니다.
 
-### 시간표
+## 현재 코드 기준 한계와 주의사항
 
-- 기본 적재원: `bus.jeju.go.kr/data/schedule/getScheduleTableInfo`
-- 환경 override: `ROUTE_TIMETABLE_BASE_URL`
-  - `.xlsx`
-  - `.xls`
+### 1. 장소 검색은 Kakao-only
 
-### 실시간 디바이스 매핑
+- 현재 `/api/search?kind=place`는 Kakao만 사용합니다.
+- VISIT JEJU 데이터는 place search fallback이 아닙니다.
 
-- 적재원: 별도 공식 source 파일
-- 환경 필수: `VEHICLE_MAP_SOURCE_URL`
+### 2. OSRM 필수
 
-### 실시간 GNSS
+- planner와 `walk-links`는 OSRM 없이는 동작하지 않습니다.
+- 더 이상 직선거리 fallback이 없습니다.
 
-- 적재원: `data.go.kr` 제주 버스 GNSS API
-- 환경 필수: `DATA_GO_KR_SERVICE_KEY`
+### 3. job 이름과 실제 소스가 완전히 일치하지 않음
 
-## Worker Job 설명
+- `routes-openapi`, `route-patterns-openapi`라는 이름이지만
+- 현재 기본 구현은 여전히 `bus.jeju.go.kr` live/search endpoint 의존이 큽니다.
 
-### `stops`
+### 4. 시간표 누락이 있으면 좋은 경로를 놓칠 수 있음
 
-- 실정류소 master 적재
-- `Stop` upsert
-- 기본적으로 제주 전역 bounds 조회를 사용
+- 현재 planner는 `Trip`이 있는 pattern만 사용합니다.
+- 따라서 실제 현장에는 버스가 오더라도, 해당 패턴의 schedule source / trip가 비어 있으면 경로 후보에 나타나지 않습니다.
+- 실제 확인된 사례로 일부 `202` 계열은 pattern은 존재하지만 trip가 없어 cleaner route를 놓칠 수 있습니다.
 
-### `stop-translations`
+### 5. stop-to-stop 도보 연쇄가 길어질 수 있음
 
-- 정류소 다국어명 적재
-- bus.jeju 다국어 필드 또는 외부 XLSX/JSON 사용
+- 현재 엔진은 `STOP_STOP` walk link를 연속해서 탈 수 있습니다.
+- 데이터가 비는 구간에서는 사람이 보기엔 부자연스러운 "정류장 연속 도보 환승" 경로가 나올 수 있습니다.
 
-### `visit-jeju-places`
+### 6. `worker:run-all`은 optional job까지 포함
 
-- 현재 플래너 장소 검색에는 사용하지 않습니다.
-- VISIT JEJU 관광지/음식점/숙소 적재
-- 운영시간 raw/json 파싱
-- `Place`, `PlaceLocale`, 세부 detail 테이블 upsert
+- `vehicle-device-map` 환경변수가 없으면 `worker:run-all`이 중간에 실패할 수 있습니다.
+- planner만 준비하려면 권장 최소 순서를 수동으로 실행하는 편이 더 안전합니다.
 
-### `routes-html`
+## 테스트와 검증
 
-- `bus.jeju.go.kr` 모바일 HTML에서 schedule id, 노선 번호, 방향, 메타데이터 적재
-- `Route`, `RoutePattern` upsert
+```bash
+npm run typecheck
+npm test
+npm run build
+```
 
-### `timetables-xlsx`
-
-- 가장 오래 걸리는 job입니다.
-- route pattern마다 시간표를 수집하고 `Trip`, `StopTime`, `RoutePatternStop`을 만듭니다.
-- stop name matching을 위해
-  - 정규화 키
-  - bus.jeju line info
-  - 번역명
-  - 축약 alias
-  - fallback known stop scoring
-  를 함께 사용합니다.
-- 기존 샘플/legacy transit data는 이 job 시작 시 정리합니다.
-
-### `vehicle-device-map`
-
-- route pattern과 GNSS device id를 연결
-- 이 job이 없으면 실행 세션은 실시간 대신 시간표 fallback 으로 동작합니다.
-
-### `walk-links`
-
-- OSRM 기반 보행 링크 적재
-- `PLACE_STOP`, `STOP_PLACE`, `STOP_STOP`을 생성
-- 플래너 readiness에는 특히 `STOP_STOP`이 중요합니다.
+Windows에서는 Prisma DLL rename 관련 `EPERM`이 간헐적으로 발생할 수 있습니다. 이 경우 Prisma/Node 프로세스를 정리한 뒤 다시 빌드하는 편이 안전합니다.
 
 ## 프로젝트 구조
 
@@ -275,322 +584,11 @@ app/                      Next.js App Router pages and API routes
 src/components/           UI components
 src/features/admin/       Admin dashboard query logic
 src/features/planner/     Search, planning, scoring, warnings, realtime
-src/lib/                  Env, db, errors, source catalog, OSRM helpers
+src/lib/                  Env, db, source catalog, OSRM helpers, errors
 prisma/                   Prisma schema and seed
 tests/                    Vitest tests
-worker/core/              Runtime, loaders, fetch helpers, job runner
+worker/core/              Worker runtime, fetch helpers, job runner
 worker/jobs/              Ingest jobs and parsers
-docker/                   OSRM dataset notes
-```
-
-## 환경 변수
-
-| 이름 | 필수 | 설명 |
-| --- | --- | --- |
-| `DATABASE_URL` | 예 | Prisma SQLite DB 경로 |
-| `OSRM_BASE_URL` | 아니오 | 기본값 `http://localhost:5000`, OSRM이 응답하지 않으면 상세 원인과 함께 오류 반환 |
-| `ENABLE_INTERNAL_ADMIN` | 아니오 | `/admin` 활성화 |
-| `BUS_JEJU_BASE_URL` | 아니오 | 기본값 `https://bus.jeju.go.kr` |
-| `KAKAO_REST_API_KEY` | 예 | 카카오 장소 검색 활성화 |
-| `VISIT_JEJU_BASE_URL` | 아니오 | VISIT JEJU override source |
-| `BUS_STOPS_SOURCE_URL` | 아니오 | 정류소 source override |
-| `STOP_TRANSLATIONS_XLSX_PATH` | 아니오 | 정류소 번역 source override |
-| `ROUTE_TIMETABLE_BASE_URL` | 아니오 | 시간표 workbook/source override |
-| `VEHICLE_MAP_SOURCE_URL` | 아니오 | vehicle-device-map 적재 source |
-| `DATA_GO_KR_SERVICE_KEY` | 아니오 | GNSS 실시간 반영 |
-| `ROUTE_SEARCH_TERMS` | 아니오 | route search 추가 키워드, 쉼표 구분 |
-
-## 로컬 실행
-
-### 1. 설치
-
-```bash
-npm install
-Copy-Item .env.example .env
-```
-
-### 2. DB 준비
-
-```bash
-npx prisma db push --skip-generate
-npm run prisma:generate
-npm run prisma:seed
-```
-
-설명:
-
-- `prisma:seed`는 샘플 데이터를 넣지 않습니다.
-- source catalog와 ingest job metadata만 준비합니다.
-
-### 3. 실데이터 ingest
-
-처음 세팅에서는 아래 순서를 권장합니다.
-
-```bash
-npm run worker -- --job stops
-npm run worker -- --job stop-translations
-npm run worker -- --job visit-jeju-places
-npm run worker -- --job routes-html
-npm run worker -- --job timetables-xlsx
-npm run worker -- --job vehicle-device-map
-npm run worker -- --job walk-links
-```
-
-- `vehicle-device-map`은 `VEHICLE_MAP_SOURCE_URL`이 준비된 경우에만 실행하면 됩니다.
-- 실시간 매핑이 아직 필요 없다면 나머지 job만 먼저 적재해도 플래너 기본 기능은 동작합니다.
-
-또는 한 번에:
-
-```bash
-npm run worker:run-all
-```
-
-주의:
-
-- `worker:run-all`은 순차 실행이며 오래 걸릴 수 있습니다.
-- 특히 `timetables-xlsx`는 수백 개 route pattern을 처리하기 때문에 가장 오래 걸립니다.
-- `worker:run-all`에는 `vehicle-device-map`도 포함되므로, `VEHICLE_MAP_SOURCE_URL`이 없으면 해당 단계에서 실패합니다.
-- 실시간 매핑이 아직 필요 없다면 `vehicle-device-map`을 제외하고 개별 job 실행이 더 안전합니다.
-
-### 4. 개발 서버 실행
-
-```bash
-npm run dev
-```
-
-`npm run dev`는 OSRM 개발 의존성을 자동으로 준비합니다.
-
-- Jeju `.osm.pbf` 다운로드
-- `osrm-extract`, `osrm-partition`, `osrm-customize`
-- `localhost:5000` OSRM 서버 실행
-- Next.js dev server를 `5176` 포트로 실행
-
-기본 접속:
-
-- `http://localhost:5176/planner`
-- `http://localhost:5176/admin`
-
-포트가 이미 점유되어 있으면:
-
-```bash
-npm run dev -- --port 5177
-```
-
-## Planner Ready 조건
-
-플래너는 아래 조건을 모두 만족해야 `ready=true`가 됩니다.
-
-- `stops` 성공
-- `routes-html` 성공
-- `timetables-xlsx` 성공
-- `walk-links` 성공
-- `stopCount > 0`
-- `routePatternCount > 0`
-- `tripCount > 0`
-- `STOP_STOP walkLinkCount > 0`
-- 장소 검색 가능 상태
-  - `KAKAO_REST_API_KEY`가 설정되어 있음
-
-이 조건을 만족하지 않으면 `/planner`에서 setup 안내 문구가 표시됩니다.
-
-## 예시 사용 흐름
-
-1. `/planner`에서 장소를 2~5개 선택합니다.
-2. 각 장소의 체류시간을 정합니다.
-3. `후보 3개 계산하기`를 누릅니다.
-4. `/planner/results/[planId]`에서 후보를 비교합니다.
-5. 원하는 후보에서 실행 세션을 시작합니다.
-6. `/planner/execute/[sessionId]`에서 현재/다음 leg와 실시간 적용 여부를 확인합니다.
-
-## API 예시
-
-### 장소 검색
-
-```http
-GET /api/search?kind=place&q=동문시장&limit=5
-```
-
-### 플랜 생성
-
-저장된 장소 기반:
-
-```json
-{
-  "language": "ko",
-  "startAt": "2026-03-24T09:20:00+09:00",
-  "places": [
-    { "mode": "stored", "placeId": "visit-1001", "dwellMinutes": 60 },
-    { "mode": "stored", "placeId": "visit-1006", "dwellMinutes": 60 }
-  ]
-}
-```
-
-외부 검색 결과 기반:
-
-```json
-{
-  "language": "ko",
-  "startAt": "2026-03-24T09:20:00+09:00",
-  "places": [
-    {
-      "mode": "external",
-      "displayName": "동문시장",
-      "latitude": 33.5118,
-      "longitude": 126.5260,
-      "regionName": "제주시",
-      "categoryLabel": "전통시장",
-      "provider": "kakao",
-      "externalId": "123456",
-      "dwellMinutes": 60
-    },
-    {
-      "mode": "external",
-      "displayName": "성산일출봉",
-      "latitude": 33.4588,
-      "longitude": 126.9425,
-      "regionName": "서귀포시",
-      "categoryLabel": "관광지",
-      "provider": "kakao",
-      "externalId": "654321",
-      "dwellMinutes": 60
-    }
-  ]
-}
-```
-
-### 실행 세션 시작
-
-```json
-{
-  "planCandidateId": "cm..."
-}
-```
-
-## Docker
-
-이 저장소에는 개발용 `docker-compose.yml`이 포함되어 있습니다.
-
-구성:
-
-- `web`
-- `worker`
-- `osrm`
-
-시작 전 준비:
-
-- `docker/osrm/jeju-latest.osrm` 파일이 필요합니다.
-- 이 파일은 미리 `osrm-extract -> osrm-partition -> osrm-customize`를 거쳐 만들어야 합니다.
-
-실행:
-
-```bash
-docker compose up --build
-```
-
-주의:
-
-- 현재 compose의 `worker`는 시작 시 `npm run worker:run-all`을 실행합니다.
-- 따라서 첫 기동은 꽤 오래 걸릴 수 있습니다.
-- `VEHICLE_MAP_SOURCE_URL`이 비어 있으면 `worker` 컨테이너는 `vehicle-device-map` 단계에서 실패할 수 있습니다.
-
-## 테스트 / 검증
-
-```bash
-npm run typecheck
-npm test
-```
-
-테스트 범위:
-
-- planner scoring / realtime fallback
-- opening hours parsing / warning
-- bus.jeju HTML / timetable parser
-- stop translation parser
-- stop matching alias regression
-- 장거리 라우팅 회귀 테스트
-
-## 트러블슈팅
-
-### 1. `/planner`에서 ingest 필요 안내가 계속 보일 때
-
-확인할 것:
-
-- `walk-links`가 성공했는지
-- `STOP_STOP` 링크가 0이 아닌지
-- `timetables-xlsx`가 중간에 실패하지 않았는지
-
-권장 명령:
-
-```bash
-npm run worker -- --job timetables-xlsx
-npm run worker -- --job vehicle-device-map
-npm run worker -- --job walk-links
-```
-
-- `vehicle-device-map`은 실시간 매핑을 쓸 때만 다시 실행하면 됩니다.
-
-### 2. 장소 검색 결과가 안 뜰 때
-
-- 먼저 `http://localhost:5176/api/search?kind=place&q=동문&limit=5`를 직접 열어 봅니다.
-- 응답이 오면 브라우저 캐시/포트 문제일 수 있습니다.
-- 현재 구현에서는 `KAKAO_REST_API_KEY`가 없으면 장소 검색 API가 응답하지 않습니다.
-- 다만 현재 구현에서는 버스 ingest readiness가 먼저 충족되어야 검색 API도 응답합니다.
-
-### 3. `worker:run-all`이 너무 오래 걸릴 때
-
-- 정상입니다. 특히 `timetables-xlsx`가 오래 걸립니다.
-- 필요한 job만 개별 실행하는 편이 개발 중에는 더 낫습니다.
-- `VEHICLE_MAP_SOURCE_URL` 없이 `worker:run-all`을 실행했다면 `vehicle-device-map` 단계에서 실패할 수 있습니다.
-
-### 4. `npm run build`가 Windows에서 Prisma DLL rename 오류를 낼 때
-
-개발 서버나 Prisma를 잡고 있는 프로세스가 켜져 있을 가능성이 큽니다.
-
-권장 순서:
-
-- 실행 중인 `npm run dev`를 먼저 종료합니다.
-- 그 다음 아래 명령을 다시 실행합니다.
-
-```bash
-npm run build
-```
-
-### 5. 실시간이 항상 미적용일 때
-
-아래 조건을 확인하세요.
-
-- `DATA_GO_KR_SERVICE_KEY`가 설정되었는가
-- `vehicle-device-map` job이 성공했는가
-- 현재 선택한 후보에 `VehicleDeviceMap`이 있는 route pattern이 포함되는가
-
-## 현재 제약과 한계
-
-- DB는 SQLite 단일 파일입니다.
-- `/admin`은 인증 없이 환경 변수 게이트만 있습니다.
-- 실시간은 현재/다음 ride leg 보정 중심이며, 전 구간 재탐색은 하지 않습니다.
-- `vehicle-device-map`는 외부 source 파일이 필요합니다.
-- 장소 검색은 `KAKAO_REST_API_KEY`가 필요합니다.
-- 일부 시간표는 원본 누락으로 `isEstimated=true` stop time이 포함될 수 있습니다.
-
-## 운영 팁
-
-- 처음 한 번은 필요한 환경 변수를 채운 뒤 `worker:run-all`
-- 이후 개발 중에는 변경한 job만 다시 실행
-- 경로가 이상하면 먼저 `/admin`에서
-  - POI join exception(사전 계산 link 기준)
-  - route pattern review
-  - timetable review
-  를 확인
-
-## 관련 명령 모음
-
-```bash
-npm install
-npx prisma db push --skip-generate
-npm run prisma:generate
-npm run prisma:seed
-npm run worker:run-all
-npm run dev
-npm run typecheck
-npm test
+scripts/                  dev / OSRM helper scripts
+docker/osrm/              OSRM dataset and compose assets
 ```
