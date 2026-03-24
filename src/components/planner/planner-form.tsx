@@ -284,7 +284,7 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
 
         {error ? (
           <p className="mt-4 rounded-2xl border border-coral/25 bg-coral/10 px-4 py-3 text-sm text-coral">
-            {error}
+            오류: {error}
           </p>
         ) : null}
 

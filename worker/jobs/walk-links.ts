@@ -1,4 +1,5 @@
-import { estimateWalkFromDistance, getWalkRoute, haversineMeters } from "@/lib/osrm";
+import { getWalkRoute, haversineMeters } from "@/lib/osrm";
+import { RouteNotFoundError } from "@/lib/errors";
 import type { WorkerRuntime } from "@/worker/core/runtime";
 import type { JobOutcome } from "@/worker/jobs/types";
 
@@ -11,16 +12,7 @@ async function measureWalk(
   from: { latitude: number; longitude: number },
   to: { latitude: number; longitude: number },
 ) {
-  const directDistance = haversineMeters(from, to);
-
-  try {
-    return await getWalkRoute(runtime.env.osrmBaseUrl, from, to);
-  } catch {
-    return {
-      distanceMeters: directDistance,
-      durationMinutes: estimateWalkFromDistance(directDistance),
-    };
-  }
+  return getWalkRoute(runtime.env.osrmBaseUrl, from, to);
 }
 
 export async function runWalkLinksJob(runtime: WorkerRuntime): Promise<JobOutcome> {
@@ -34,15 +26,7 @@ export async function runWalkLinksJob(runtime: WorkerRuntime): Promise<JobOutcom
     }),
     runtime.prisma.stop.findMany({
       where: {
-        routePatternStops: {
-          some: {
-            routePattern: {
-              scheduleId: {
-                not: null,
-              },
-            },
-          },
-        },
+        OR: [{ latitude: { not: 0 } }, { longitude: { not: 0 } }],
       },
     }),
   ]);
@@ -60,6 +44,7 @@ export async function runWalkLinksJob(runtime: WorkerRuntime): Promise<JobOutcom
     rank: number;
     isPrecomputed: boolean;
   }> = [];
+  let skippedNoRouteCount = 0;
 
   for (const place of places) {
     const rankedStops = stops
@@ -72,7 +57,18 @@ export async function runWalkLinksJob(runtime: WorkerRuntime): Promise<JobOutcom
       .slice(0, MAX_PLACE_STOP_LINKS);
 
     for (const [index, item] of rankedStops.entries()) {
-      const measured = await measureWalk(runtime, place, item.stop);
+      let measured;
+      try {
+        measured = await measureWalk(runtime, place, item.stop);
+      } catch (error) {
+        if (error instanceof RouteNotFoundError) {
+          skippedNoRouteCount += 1;
+          continue;
+        }
+
+        throw error;
+      }
+
       links.push({
         kind: "PLACE_STOP",
         fromPlaceId: place.id,
@@ -110,7 +106,18 @@ export async function runWalkLinksJob(runtime: WorkerRuntime): Promise<JobOutcom
       .slice(0, 4);
 
     for (const [index, item] of rankedStops.entries()) {
-      const measured = await measureWalk(runtime, fromStop, item.stop);
+      let measured;
+      try {
+        measured = await measureWalk(runtime, fromStop, item.stop);
+      } catch (error) {
+        if (error instanceof RouteNotFoundError) {
+          skippedNoRouteCount += 1;
+          continue;
+        }
+
+        throw error;
+      }
+
       links.push({
         kind: "STOP_STOP",
         fromStopId: fromStop.id,
@@ -136,6 +143,7 @@ export async function runWalkLinksJob(runtime: WorkerRuntime): Promise<JobOutcom
     meta: {
       places: places.length,
       stops: stops.length,
+      skippedNoRouteCount,
     },
   };
 }

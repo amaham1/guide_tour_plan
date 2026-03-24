@@ -3,9 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: npm run dev
+    command: npm run dev:app -- --port 5176
     ports:
-      - "3000:3000"
+      - "5176:5176"
     env_file:
       - .env
     environment:
@@ -35,7 +35,7 @@ services:
 
   osrm:
     image: ghcr.io/project-osrm/osrm-backend:latest
-    command: osrm-routed --algorithm mld /data/jeju-latest.osrm
+    command: osrm-routed --algorithm mld /data/jeju-non-military.osrm
     ports:
       - "5000:5000"
     volumes:

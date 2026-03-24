@@ -1,12 +1,12 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { db } from "@/lib/db";
 import { appEnv } from "@/lib/env";
-import { InvalidRequestError, ResourceNotFoundError } from "@/lib/errors";
 import {
-  estimateWalkFromDistance,
-  getWalkRoute,
-  haversineMeters,
-} from "@/lib/osrm";
+  InvalidRequestError,
+  ResourceNotFoundError,
+  RouteNotFoundError,
+} from "@/lib/errors";
+import { getWalkRoute, haversineMeters } from "@/lib/osrm";
 import { assertPlannerCatalogReady } from "@/features/planner/catalog";
 import {
   buildPlannerCandidates,
@@ -56,9 +56,9 @@ type DynamicStopLink = {
   distanceMeters: number;
 };
 
-const PLACE_STOP_PREFILTER_LIMIT = 12;
-const PLACE_STOP_LIMIT = 5;
-const MAX_NEARBY_STOP_DISTANCE_METERS = 1_800;
+const PLACE_STOP_PREFILTER_LIMIT = 24;
+const PLACE_STOP_LIMIT = 12;
+const MAX_NEARBY_STOP_DISTANCE_METERS = 3_000;
 
 function pickPlaceName(
   place: {
@@ -227,7 +227,7 @@ async function measurePlaceStopLinks(
   const candidates = rankCandidateStops(anchor, stops);
 
   const measured = await Promise.all(
-    candidates.map(async ({ stop, crowDistanceMeters }) => {
+    candidates.map(async ({ stop }) => {
       try {
         const route = await getWalkRoute(
           appEnv.osrmBaseUrl,
@@ -246,17 +246,24 @@ async function measurePlaceStopLinks(
           durationMinutes: route.durationMinutes,
           distanceMeters: route.distanceMeters,
         };
-      } catch {
-        return {
-          stopId: stop.id,
-          durationMinutes: estimateWalkFromDistance(crowDistanceMeters),
-          distanceMeters: crowDistanceMeters,
-        };
+      } catch (error) {
+        if (error instanceof RouteNotFoundError) {
+          return null;
+        }
+
+        throw error;
       }
     }),
   );
 
-  return measured
+  const reachableLinks = measured.filter((link): link is DynamicStopLink => link !== null);
+  if (reachableLinks.length === 0) {
+    throw new RouteNotFoundError(
+      `${anchor.displayName} 인근에서 도보로 연결 가능한 정류장을 찾지 못했습니다.`,
+    );
+  }
+
+  return reachableLinks
     .sort((left, right) => {
       if (left.durationMinutes !== right.durationMinutes) {
         return left.durationMinutes - right.durationMinutes;
@@ -317,19 +324,7 @@ async function loadPlannerGraph(
   anchors: PlannerAnchor[],
 ): Promise<PlannerGraphContext> {
   const [stops, stopTransfers, patterns] = await Promise.all([
-    prisma.stop.findMany({
-      where: {
-        routePatternStops: {
-          some: {
-            routePattern: {
-              scheduleId: {
-                not: null,
-              },
-            },
-          },
-        },
-      },
-    }),
+    prisma.stop.findMany(),
     prisma.walkLink.findMany({
       where: {
         kind: "STOP_STOP",
@@ -556,23 +551,7 @@ export async function searchCatalog(rawInput: unknown) {
   await assertPlannerCatalogReady(db);
 
   if (input.kind === "place") {
-    const combined = new Map<string, SearchResultDto>();
-
-    if (appEnv.kakaoRestApiKey) {
-      const kakaoResults = await searchKakaoPlaces(input.q, input.limit);
-      for (const result of kakaoResults) {
-        combined.set(result.id, result);
-      }
-    }
-
-    if (combined.size < input.limit) {
-      const storedResults = await searchStoredPlaces(input.q, input.limit - combined.size);
-      for (const result of storedResults) {
-        combined.set(result.id, result);
-      }
-    }
-
-    return [...combined.values()].slice(0, input.limit);
+    return searchKakaoPlaces(input.q, input.limit);
   }
 
   const stops = await db.stop.findMany({

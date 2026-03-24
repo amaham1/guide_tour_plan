@@ -8,3 +8,5 @@ dist
 *.db-journal
 .env
 tmp_*
+docker/osrm/*.osm.pbf
+docker/osrm/*.osrm*

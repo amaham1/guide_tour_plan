@@ -79,7 +79,7 @@ export async function getPlannerCatalogStatus(prisma: PrismaClient = db) {
     tripCount > 0 &&
     walkLinkCount > 0;
 
-  const placeSearchReady = placeCount > 0 || Boolean(appEnv.kakaoRestApiKey);
+  const placeSearchReady = Boolean(appEnv.kakaoRestApiKey);
   const ready = busReady && placeSearchReady;
 
   let message = "플래너 카탈로그가 준비되었습니다.";
@@ -87,8 +87,7 @@ export async function getPlannerCatalogStatus(prisma: PrismaClient = db) {
     message =
       "먼저 버스 ingest가 필요합니다. 관리자 화면에서 정류소, 노선, 시간표, 보행 링크 적재를 완료해 주세요.";
   } else if (!placeSearchReady) {
-    message =
-      "장소 검색원이 없습니다. Kakao REST API 키를 설정하거나 Visit Jeju 장소 ingest를 먼저 실행해 주세요.";
+    message = "장소 검색을 위해 KAKAO_REST_API_KEY를 설정해 주세요.";
   }
 
   return {

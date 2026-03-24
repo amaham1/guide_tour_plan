@@ -11,6 +11,38 @@ import type {
   PlannerEngineInput,
 } from "@/features/planner/types";
 
+function createTrip(
+  id: string,
+  routePatternId: string,
+  routeShortName: string,
+  headsign: string,
+  stopTimes: Array<{
+    stopId: string;
+    stopName: string;
+    sequence: number;
+    arrivalMinutes: number;
+    departureMinutes: number;
+    isEstimated?: boolean;
+  }>,
+) {
+  const normalizedStopTimes = stopTimes.map((stopTime) => ({
+    ...stopTime,
+    isEstimated: stopTime.isEstimated ?? false,
+  }));
+
+  return {
+    id,
+    routePatternId,
+    routeShortName,
+    routeDisplayName: routeShortName,
+    headsign,
+    stopTimes: normalizedStopTimes,
+    stopTimeByStopId: new Map(
+      normalizedStopTimes.map((stopTime) => [stopTime.stopId, stopTime] as const),
+    ),
+  };
+}
+
 describe("planner scoring", () => {
   const fastMetrics: CandidateMetrics = {
     totalDurationMinutes: 180,
@@ -339,5 +371,453 @@ describe("planner engine long-distance routing", () => {
     expect(candidates[0]?.legs.some((leg) => leg.kind === "ride" && leg.routeShortName === "111")).toBe(
       true,
     );
+  });
+});
+
+describe("planner engine access stop optimization", () => {
+  it("walks through the stop graph before the first boarding when it yields an earlier trip", () => {
+    const input: PlannerEngineInput = {
+      startAt: "2026-03-24T08:40:00+09:00",
+      places: [
+        {
+          placeId: "place-start",
+          dwellMinutes: 10,
+        },
+        {
+          placeId: "place-end",
+          dwellMinutes: 30,
+        },
+      ],
+    };
+
+    const context: PlannerGraphContext = {
+      places: new Map([
+        [
+          "place-start",
+          {
+            id: "place-start",
+            displayName: "출발지",
+            regionName: "제주시",
+            latitude: 33.5,
+            longitude: 126.5,
+            openingHoursRaw: null,
+            openingHoursJson: null,
+          },
+        ],
+        [
+          "place-end",
+          {
+            id: "place-end",
+            displayName: "도착지",
+            regionName: "제주시",
+            latitude: 33.52,
+            longitude: 126.55,
+            openingHoursRaw: null,
+            openingHoursJson: null,
+          },
+        ],
+      ]),
+      stops: new Map([
+        [
+          "stop-access",
+          {
+            id: "stop-access",
+            displayName: "출발 정류장",
+            latitude: 33.5005,
+            longitude: 126.5005,
+          },
+        ],
+        [
+          "stop-best",
+          {
+            id: "stop-best",
+            displayName: "더 좋은 정류장",
+            latitude: 33.501,
+            longitude: 126.501,
+          },
+        ],
+        [
+          "stop-dest",
+          {
+            id: "stop-dest",
+            displayName: "도착 정류장",
+            latitude: 33.52,
+            longitude: 126.55,
+          },
+        ],
+      ]),
+      accessLinksByPlace: new Map([
+        [
+          "place-start",
+          [
+            {
+              kind: "PLACE_STOP",
+              fromPlaceId: "place-start",
+              toPlaceId: null,
+              fromStopId: null,
+              toStopId: "stop-access",
+              durationMinutes: 7,
+              distanceMeters: 550,
+              rank: 1,
+            },
+          ],
+        ],
+        [
+          "place-end",
+          [
+            {
+              kind: "PLACE_STOP",
+              fromPlaceId: "place-end",
+              toPlaceId: null,
+              fromStopId: null,
+              toStopId: "stop-dest",
+              durationMinutes: 4,
+              distanceMeters: 280,
+              rank: 1,
+            },
+          ],
+        ],
+      ]),
+      egressLinksByPlace: new Map([
+        [
+          "place-start",
+          [
+            {
+              kind: "STOP_PLACE",
+              fromPlaceId: null,
+              toPlaceId: "place-start",
+              fromStopId: "stop-access",
+              toStopId: null,
+              durationMinutes: 7,
+              distanceMeters: 550,
+              rank: 1,
+            },
+          ],
+        ],
+        [
+          "place-end",
+          [
+            {
+              kind: "STOP_PLACE",
+              fromPlaceId: null,
+              toPlaceId: "place-end",
+              fromStopId: "stop-dest",
+              toStopId: null,
+              durationMinutes: 4,
+              distanceMeters: 280,
+              rank: 1,
+            },
+          ],
+        ],
+      ]),
+      stopTransfersByOrigin: new Map([
+        [
+          "stop-access",
+          [
+            {
+              kind: "STOP_STOP",
+              fromPlaceId: null,
+              toPlaceId: null,
+              fromStopId: "stop-access",
+              toStopId: "stop-best",
+              durationMinutes: 2,
+              distanceMeters: 140,
+              rank: 1,
+            },
+          ],
+        ],
+      ]),
+      trips: [
+        createTrip("trip-best", "pattern-best", "201", "도착 정류장", [
+          {
+            stopId: "stop-best",
+            stopName: "더 좋은 정류장",
+            sequence: 1,
+            arrivalMinutes: 545,
+            departureMinutes: 545,
+          },
+          {
+            stopId: "stop-dest",
+            stopName: "도착 정류장",
+            sequence: 2,
+            arrivalMinutes: 575,
+            departureMinutes: 575,
+          },
+        ]),
+        createTrip("trip-late", "pattern-late", "299", "도착 정류장", [
+          {
+            stopId: "stop-access",
+            stopName: "출발 정류장",
+            sequence: 1,
+            arrivalMinutes: 560,
+            departureMinutes: 560,
+          },
+          {
+            stopId: "stop-dest",
+            stopName: "도착 정류장",
+            sequence: 2,
+            arrivalMinutes: 610,
+            departureMinutes: 610,
+          },
+        ]),
+      ],
+      realtimePatternIds: new Set(),
+    };
+
+    const candidates = buildPlannerCandidates("plan-access-opt", input, context);
+    const fastest = candidates.find((candidate) => candidate.kind === "FASTEST");
+
+    expect(fastest).toBeDefined();
+    expect(
+      fastest?.legs.some(
+        (leg) =>
+          leg.kind === "walk" &&
+          leg.fromStopId === "stop-access" &&
+          leg.toStopId === "stop-best",
+      ),
+    ).toBe(true);
+    expect(fastest?.legs.find((leg) => leg.kind === "ride")?.fromStopId).toBe("stop-best");
+  });
+
+  it("keeps the nearer boarding stop when the faster journey requires more than one transfer", () => {
+    const input: PlannerEngineInput = {
+      startAt: "2026-03-24T08:40:00+09:00",
+      places: [
+        {
+          placeId: "place-start",
+          dwellMinutes: 10,
+        },
+        {
+          placeId: "place-end",
+          dwellMinutes: 30,
+        },
+      ],
+    };
+
+    const context: PlannerGraphContext = {
+      places: new Map([
+        [
+          "place-start",
+          {
+            id: "place-start",
+            displayName: "출발지",
+            regionName: "제주시",
+            latitude: 33.5,
+            longitude: 126.5,
+            openingHoursRaw: null,
+            openingHoursJson: null,
+          },
+        ],
+        [
+          "place-end",
+          {
+            id: "place-end",
+            displayName: "도착지",
+            regionName: "서귀포시",
+            latitude: 33.4,
+            longitude: 126.9,
+            openingHoursRaw: null,
+            openingHoursJson: null,
+          },
+        ],
+      ]),
+      stops: new Map([
+        [
+          "stop-near",
+          {
+            id: "stop-near",
+            displayName: "가까운 정류장",
+            latitude: 33.5005,
+            longitude: 126.5005,
+          },
+        ],
+        [
+          "stop-far",
+          {
+            id: "stop-far",
+            displayName: "먼 정류장",
+            latitude: 33.504,
+            longitude: 126.504,
+          },
+        ],
+        [
+          "stop-x",
+          {
+            id: "stop-x",
+            displayName: "환승 정류장 1",
+            latitude: 33.45,
+            longitude: 126.65,
+          },
+        ],
+        [
+          "stop-y",
+          {
+            id: "stop-y",
+            displayName: "환승 정류장 2",
+            latitude: 33.43,
+            longitude: 126.8,
+          },
+        ],
+        [
+          "stop-target",
+          {
+            id: "stop-target",
+            displayName: "도착 정류장",
+            latitude: 33.401,
+            longitude: 126.901,
+          },
+        ],
+      ]),
+      accessLinksByPlace: new Map([
+        [
+          "place-start",
+          [
+            {
+              kind: "PLACE_STOP",
+              fromPlaceId: "place-start",
+              toPlaceId: null,
+              fromStopId: null,
+              toStopId: "stop-near",
+              durationMinutes: 5,
+              distanceMeters: 350,
+              rank: 1,
+            },
+            {
+              kind: "PLACE_STOP",
+              fromPlaceId: "place-start",
+              toPlaceId: null,
+              fromStopId: null,
+              toStopId: "stop-far",
+              durationMinutes: 18,
+              distanceMeters: 1_350,
+              rank: 2,
+            },
+          ],
+        ],
+        [
+          "place-end",
+          [
+            {
+              kind: "PLACE_STOP",
+              fromPlaceId: "place-end",
+              toPlaceId: null,
+              fromStopId: null,
+              toStopId: "stop-target",
+              durationMinutes: 4,
+              distanceMeters: 260,
+              rank: 1,
+            },
+          ],
+        ],
+      ]),
+      egressLinksByPlace: new Map([
+        [
+          "place-start",
+          [
+            {
+              kind: "STOP_PLACE",
+              fromPlaceId: null,
+              toPlaceId: "place-start",
+              fromStopId: "stop-near",
+              toStopId: null,
+              durationMinutes: 5,
+              distanceMeters: 350,
+              rank: 1,
+            },
+          ],
+        ],
+        [
+          "place-end",
+          [
+            {
+              kind: "STOP_PLACE",
+              fromPlaceId: null,
+              toPlaceId: "place-end",
+              fromStopId: "stop-target",
+              toStopId: null,
+              durationMinutes: 4,
+              distanceMeters: 260,
+              rank: 1,
+            },
+          ],
+        ],
+      ]),
+      stopTransfersByOrigin: new Map(),
+      trips: [
+        createTrip("trip-far-direct", "pattern-far-direct", "900", "도착 정류장", [
+          {
+            stopId: "stop-far",
+            stopName: "먼 정류장",
+            sequence: 1,
+            arrivalMinutes: 553,
+            departureMinutes: 553,
+          },
+          {
+            stopId: "stop-target",
+            stopName: "도착 정류장",
+            sequence: 2,
+            arrivalMinutes: 625,
+            departureMinutes: 625,
+          },
+        ]),
+        createTrip("trip-near-1", "pattern-near-1", "101", "환승 정류장 1", [
+          {
+            stopId: "stop-near",
+            stopName: "가까운 정류장",
+            sequence: 1,
+            arrivalMinutes: 540,
+            departureMinutes: 540,
+          },
+          {
+            stopId: "stop-x",
+            stopName: "환승 정류장 1",
+            sequence: 2,
+            arrivalMinutes: 555,
+            departureMinutes: 555,
+          },
+        ]),
+        createTrip("trip-near-2", "pattern-near-2", "202", "환승 정류장 2", [
+          {
+            stopId: "stop-x",
+            stopName: "환승 정류장 1",
+            sequence: 1,
+            arrivalMinutes: 559,
+            departureMinutes: 559,
+          },
+          {
+            stopId: "stop-y",
+            stopName: "환승 정류장 2",
+            sequence: 2,
+            arrivalMinutes: 580,
+            departureMinutes: 580,
+          },
+        ]),
+        createTrip("trip-near-3", "pattern-near-3", "303", "도착 정류장", [
+          {
+            stopId: "stop-y",
+            stopName: "환승 정류장 2",
+            sequence: 1,
+            arrivalMinutes: 584,
+            departureMinutes: 584,
+          },
+          {
+            stopId: "stop-target",
+            stopName: "도착 정류장",
+            sequence: 2,
+            arrivalMinutes: 600,
+            departureMinutes: 600,
+          },
+        ]),
+      ],
+      realtimePatternIds: new Set(),
+    };
+
+    const candidates = buildPlannerCandidates("plan-near-stop", input, context);
+    const fastest = candidates.find((candidate) => candidate.kind === "FASTEST");
+
+    expect(fastest).toBeDefined();
+    expect(fastest?.legs.find((leg) => leg.kind === "ride")?.fromStopId).toBe("stop-near");
+    expect(fastest?.legs.filter((leg) => leg.kind === "ride")).toHaveLength(3);
+    expect(fastest?.summary.totalDurationMinutes).toBe(114);
   });
 });

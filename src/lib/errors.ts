@@ -39,3 +39,33 @@ export class InvalidRequestError extends Error {
     this.name = "InvalidRequestError";
   }
 }
+
+export class DependencyUnavailableError extends Error {
+  readonly status = 503;
+  readonly code = "DEPENDENCY_UNAVAILABLE";
+
+  constructor(message = "?꾩닔 ?쓽議댁꽦 ?쒕퉬?ㅼ뿉 ?곌껐??紐삵뻽?듬땲??") {
+    super(message);
+    this.name = "DependencyUnavailableError";
+  }
+}
+
+export class UpstreamServiceError extends Error {
+  readonly status = 502;
+  readonly code = "UPSTREAM_SERVICE_ERROR";
+
+  constructor(message = "?몃? ?쒕퉬??붿껌???ㅽ뙣?덉뒿?덈떎.") {
+    super(message);
+    this.name = "UpstreamServiceError";
+  }
+}
+
+export class RouteNotFoundError extends Error {
+  readonly status = 422;
+  readonly code = "ROUTE_NOT_FOUND";
+
+  constructor(message = "?붾줈瑜?李얠? 紐삵뻽?듬땲??") {
+    super(message);
+    this.name = "RouteNotFoundError";
+  }
+}

@@ -10,15 +10,33 @@ import type {
   PlannerEngineInput,
 } from "@/features/planner/types";
 
-const ACCESS_STOP_LIMIT = 5;
+const ACCESS_STOP_LIMIT = 12;
 const MAX_PLACE_STOP_WALK_MINUTES = 25;
 const MIN_SEARCH_WINDOW_MINUTES = 90;
 const MAX_SEARCH_WINDOW_MINUTES = 210;
-const SEGMENT_OPTION_LIMIT = 5;
-const BRANCH_LIMIT = 40;
+const SEGMENT_OPTION_LIMIT = 12;
+const SEGMENT_OPTIONS_PER_PARTIAL = 8;
+const PARTIAL_FRONTIER_LIMIT = 72;
+const MAX_RIDE_ROUNDS = 5;
 const FIRST_BOARD_BUFFER = 5;
 const TRANSFER_BUFFER = 4;
 const ESTIMATED_BUFFER = 6;
+const MAX_SEGMENT_RESULT_DURATION_MINUTES = MAX_SEARCH_WINDOW_MINUTES + 120;
+const SERVICE_UTC_OFFSET_MINUTES = 9 * 60;
+
+const serviceDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Seoul",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const serviceTimeFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Seoul",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
 
 type PlaceContext = {
   id: string;
@@ -99,14 +117,137 @@ type ItineraryDraft = {
   legs: DraftLeg[];
 };
 
+type RouteContext = {
+  id: string;
+  stopIds: string[];
+  trips: TripContext[];
+};
+
+type RoutingIndex = {
+  routesById: Map<string, RouteContext>;
+  routesByStopId: Map<string, Array<{ routeId: string; stopIndex: number }>>;
+};
+
+type StopLabel = {
+  stopId: string;
+  arrivalMinutes: number;
+  walkMinutes: number;
+  safetyBufferCost: number;
+  usesEstimatedStopTimes: boolean;
+  realtimeEligible: boolean;
+  signature: string;
+  legs: DraftLeg[];
+};
+
+type PartialMetrics = Omit<CandidateMetrics, "totalDurationMinutes" | "finalArrivalMinutes">;
+
+type PartialItinerary = {
+  signature: string;
+  currentMinutes: number;
+  metrics: PartialMetrics;
+  legs: DraftLeg[];
+};
+
+type QueueEntry = {
+  stopId: string;
+  arrivalMinutes: number;
+  walkMinutes: number;
+};
+
+class MinHeap<T> {
+  private readonly items: T[] = [];
+
+  constructor(private readonly compare: (left: T, right: T) => number) {}
+
+  get size() {
+    return this.items.length;
+  }
+
+  push(value: T) {
+    this.items.push(value);
+    this.bubbleUp(this.items.length - 1);
+  }
+
+  pop() {
+    if (this.items.length === 0) {
+      return undefined;
+    }
+
+    const top = this.items[0];
+    const last = this.items.pop();
+    if (this.items.length > 0 && last) {
+      this.items[0] = last;
+      this.bubbleDown(0);
+    }
+
+    return top;
+  }
+
+  private bubbleUp(index: number) {
+    let currentIndex = index;
+    while (currentIndex > 0) {
+      const parentIndex = Math.floor((currentIndex - 1) / 2);
+      if (this.compare(this.items[currentIndex], this.items[parentIndex]) >= 0) {
+        return;
+      }
+
+      [this.items[currentIndex], this.items[parentIndex]] = [
+        this.items[parentIndex],
+        this.items[currentIndex],
+      ];
+      currentIndex = parentIndex;
+    }
+  }
+
+  private bubbleDown(index: number) {
+    let currentIndex = index;
+    while (true) {
+      const leftIndex = currentIndex * 2 + 1;
+      const rightIndex = currentIndex * 2 + 2;
+      let smallestIndex = currentIndex;
+
+      if (
+        leftIndex < this.items.length &&
+        this.compare(this.items[leftIndex], this.items[smallestIndex]) < 0
+      ) {
+        smallestIndex = leftIndex;
+      }
+
+      if (
+        rightIndex < this.items.length &&
+        this.compare(this.items[rightIndex], this.items[smallestIndex]) < 0
+      ) {
+        smallestIndex = rightIndex;
+      }
+
+      if (smallestIndex === currentIndex) {
+        return;
+      }
+
+      [this.items[currentIndex], this.items[smallestIndex]] = [
+        this.items[smallestIndex],
+        this.items[currentIndex],
+      ];
+      currentIndex = smallestIndex;
+    }
+  }
+}
+
 function toServiceMinutes(date: Date) {
-  return date.getHours() * 60 + date.getMinutes();
+  const parts = serviceTimeFormatter.formatToParts(date);
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
+  return hour * 60 + minute;
 }
 
 function fromServiceMinutes(baseDate: Date, minutes: number) {
-  const result = new Date(baseDate);
-  result.setHours(0, 0, 0, 0);
-  result.setMinutes(minutes);
+  const parts = serviceDateFormatter.formatToParts(baseDate);
+  const year = Number(parts.find((part) => part.type === "year")?.value ?? "0");
+  const month = Number(parts.find((part) => part.type === "month")?.value ?? "1");
+  const day = Number(parts.find((part) => part.type === "day")?.value ?? "1");
+  const result = new Date(
+    Date.UTC(year, month - 1, day, 0, minutes) - SERVICE_UTC_OFFSET_MINUTES * 60_000,
+  );
   return result.toISOString();
 }
 
@@ -230,39 +371,376 @@ function tripUsesEstimated(trip: TripContext, fromSequence: number, toSequence: 
   );
 }
 
-function pushUniqueSegment(
-  collection: SegmentOption[],
-  option: SegmentOption,
-  bestBySignature: Map<string, SegmentOption>,
-) {
-  const existing = bestBySignature.get(option.signature);
-  if (
-    !existing ||
-    option.arrivalMinutes < existing.arrivalMinutes ||
-    (option.arrivalMinutes === existing.arrivalMinutes &&
-      option.walkMinutes < existing.walkMinutes)
-  ) {
-    bestBySignature.set(option.signature, option);
+function createAccessWalkLeg(
+  fromPlace: PlaceContext,
+  toStop: StopContext | undefined,
+  toStopId: string,
+  startMinutes: number,
+  endMinutes: number,
+): DraftLeg {
+  const stopName = toStop?.displayName ?? toStopId;
+  return {
+    kind: "walk",
+    title: `${fromPlace.displayName}에서 ${stopName}까지 도보`,
+    startMinutes,
+    endMinutes,
+    fromLabel: fromPlace.displayName,
+    toLabel: stopName,
+    toStopId,
+  };
+}
+
+function createTransferWalkLeg(
+  fromStop: StopContext | undefined,
+  toStop: StopContext | undefined,
+  fromStopId: string,
+  toStopId: string,
+  startMinutes: number,
+  endMinutes: number,
+): DraftLeg {
+  const fromStopName = fromStop?.displayName ?? fromStopId;
+  const toStopName = toStop?.displayName ?? toStopId;
+  return {
+    kind: "walk",
+    title: `${fromStopName}에서 ${toStopName}까지 환승 도보`,
+    startMinutes,
+    endMinutes,
+    fromLabel: fromStopName,
+    toLabel: toStopName,
+    fromStopId,
+    toStopId,
+  };
+}
+
+function createEgressWalkLeg(
+  fromStop: StopContext | undefined,
+  fromStopId: string,
+  toPlace: PlaceContext,
+  startMinutes: number,
+  endMinutes: number,
+): DraftLeg {
+  const stopName = fromStop?.displayName ?? fromStopId;
+  return {
+    kind: "walk",
+    title: `${stopName}에서 ${toPlace.displayName}까지 도보`,
+    startMinutes,
+    endMinutes,
+    fromLabel: stopName,
+    toLabel: toPlace.displayName,
+    fromStopId,
+  };
+}
+
+function createWaitLeg(
+  stopName: string,
+  stopId: string,
+  startMinutes: number,
+  endMinutes: number,
+): DraftLeg {
+  return {
+    kind: "wait",
+    title: `${stopName}에서 버스 대기`,
+    startMinutes,
+    endMinutes,
+    fromLabel: stopName,
+    toLabel: stopName,
+    fromStopId: stopId,
+    toStopId: stopId,
+  };
+}
+
+function createRideLeg(
+  trip: TripContext,
+  boardStopTime: TripStopContext,
+  alightStopTime: TripStopContext,
+  estimated: boolean,
+): DraftLeg {
+  return {
+    kind: "ride",
+    title: `${trip.routeShortName}번 탑승`,
+    subtitle: `${boardStopTime.stopName} → ${alightStopTime.stopName}`,
+    startMinutes: boardStopTime.departureMinutes,
+    endMinutes: alightStopTime.arrivalMinutes,
+    fromLabel: boardStopTime.stopName,
+    toLabel: alightStopTime.stopName,
+    routeShortName: trip.routeShortName,
+    routePatternId: trip.routePatternId,
+    tripId: trip.id,
+    fromStopId: boardStopTime.stopId,
+    toStopId: alightStopTime.stopId,
+    estimated,
+  };
+}
+
+function compareStopLabels(left: StopLabel, right: StopLabel) {
+  if (left.arrivalMinutes !== right.arrivalMinutes) {
+    return left.arrivalMinutes - right.arrivalMinutes;
   }
 
-  collection.length = 0;
-  collection.push(...bestBySignature.values());
+  if (left.walkMinutes !== right.walkMinutes) {
+    return left.walkMinutes - right.walkMinutes;
+  }
+
+  if (left.safetyBufferCost !== right.safetyBufferCost) {
+    return left.safetyBufferCost - right.safetyBufferCost;
+  }
+
+  if (left.usesEstimatedStopTimes !== right.usesEstimatedStopTimes) {
+    return Number(left.usesEstimatedStopTimes) - Number(right.usesEstimatedStopTimes);
+  }
+
+  if (left.realtimeEligible !== right.realtimeEligible) {
+    return left.realtimeEligible ? -1 : 1;
+  }
+
+  return left.legs.length - right.legs.length;
+}
+
+function compareSegmentOptions(left: SegmentOption, right: SegmentOption) {
+  if (left.arrivalMinutes !== right.arrivalMinutes) {
+    return left.arrivalMinutes - right.arrivalMinutes;
+  }
+
+  if (left.walkMinutes !== right.walkMinutes) {
+    return left.walkMinutes - right.walkMinutes;
+  }
+
+  if (left.transfers !== right.transfers) {
+    return left.transfers - right.transfers;
+  }
+
+  if (left.safetyBufferCost !== right.safetyBufferCost) {
+    return left.safetyBufferCost - right.safetyBufferCost;
+  }
+
+  if (left.usesEstimatedStopTimes !== right.usesEstimatedStopTimes) {
+    return Number(left.usesEstimatedStopTimes) - Number(right.usesEstimatedStopTimes);
+  }
+
+  if (left.realtimeEligible !== right.realtimeEligible) {
+    return left.realtimeEligible ? -1 : 1;
+  }
+
+  return left.legs.length - right.legs.length;
+}
+
+function dominatesSegmentOption(left: SegmentOption, right: SegmentOption) {
+  const leftRealtimePenalty = left.realtimeEligible ? 0 : 1;
+  const rightRealtimePenalty = right.realtimeEligible ? 0 : 1;
+  const leftEstimatedPenalty = left.usesEstimatedStopTimes ? 1 : 0;
+  const rightEstimatedPenalty = right.usesEstimatedStopTimes ? 1 : 0;
+
+  const noWorse =
+    left.arrivalMinutes <= right.arrivalMinutes &&
+    left.walkMinutes <= right.walkMinutes &&
+    left.transfers <= right.transfers &&
+    left.safetyBufferCost <= right.safetyBufferCost &&
+    leftEstimatedPenalty <= rightEstimatedPenalty &&
+    leftRealtimePenalty <= rightRealtimePenalty;
+
+  const strictlyBetter =
+    left.arrivalMinutes < right.arrivalMinutes ||
+    left.walkMinutes < right.walkMinutes ||
+    left.transfers < right.transfers ||
+    left.safetyBufferCost < right.safetyBufferCost ||
+    leftEstimatedPenalty < rightEstimatedPenalty ||
+    leftRealtimePenalty < rightRealtimePenalty;
+
+  return noWorse && strictlyBetter;
+}
+
+function comparePartialItineraries(left: PartialItinerary, right: PartialItinerary) {
+  if (left.currentMinutes !== right.currentMinutes) {
+    return left.currentMinutes - right.currentMinutes;
+  }
+
+  if (left.metrics.totalWalkMinutes !== right.metrics.totalWalkMinutes) {
+    return left.metrics.totalWalkMinutes - right.metrics.totalWalkMinutes;
+  }
+
+  if (left.metrics.transfers !== right.metrics.transfers) {
+    return left.metrics.transfers - right.metrics.transfers;
+  }
+
+  if (left.metrics.safetyBufferCost !== right.metrics.safetyBufferCost) {
+    return left.metrics.safetyBufferCost - right.metrics.safetyBufferCost;
+  }
+
+  if (left.metrics.usesEstimatedStopTimes !== right.metrics.usesEstimatedStopTimes) {
+    return Number(left.metrics.usesEstimatedStopTimes) - Number(right.metrics.usesEstimatedStopTimes);
+  }
+
+  if (left.metrics.realtimeEligible !== right.metrics.realtimeEligible) {
+    return left.metrics.realtimeEligible ? -1 : 1;
+  }
+
+  return left.legs.length - right.legs.length;
+}
+
+function dominatesPartialItinerary(left: PartialItinerary, right: PartialItinerary) {
+  const leftRealtimePenalty = left.metrics.realtimeEligible ? 0 : 1;
+  const rightRealtimePenalty = right.metrics.realtimeEligible ? 0 : 1;
+  const leftEstimatedPenalty = left.metrics.usesEstimatedStopTimes ? 1 : 0;
+  const rightEstimatedPenalty = right.metrics.usesEstimatedStopTimes ? 1 : 0;
+
+  const noWorse =
+    left.currentMinutes <= right.currentMinutes &&
+    left.metrics.totalWalkMinutes <= right.metrics.totalWalkMinutes &&
+    left.metrics.transfers <= right.metrics.transfers &&
+    left.metrics.safetyBufferCost <= right.metrics.safetyBufferCost &&
+    leftEstimatedPenalty <= rightEstimatedPenalty &&
+    leftRealtimePenalty <= rightRealtimePenalty;
+
+  const strictlyBetter =
+    left.currentMinutes < right.currentMinutes ||
+    left.metrics.totalWalkMinutes < right.metrics.totalWalkMinutes ||
+    left.metrics.transfers < right.metrics.transfers ||
+    left.metrics.safetyBufferCost < right.metrics.safetyBufferCost ||
+    leftEstimatedPenalty < rightEstimatedPenalty ||
+    leftRealtimePenalty < rightRealtimePenalty;
+
+  return noWorse && strictlyBetter;
+}
+
+function upsertStopLabel(labels: Map<string, StopLabel>, candidate: StopLabel) {
+  const existing = labels.get(candidate.stopId);
+  if (!existing || compareStopLabels(candidate, existing) < 0) {
+    labels.set(candidate.stopId, candidate);
+    return true;
+  }
+
+  return false;
+}
+
+function upsertSegmentOption(bestBySignature: Map<string, SegmentOption>, candidate: SegmentOption) {
+  const existing = bestBySignature.get(candidate.signature);
+  if (!existing || compareSegmentOptions(candidate, existing) < 0) {
+    bestBySignature.set(candidate.signature, candidate);
+  }
 }
 
 function sortSegmentOptions(options: SegmentOption[]) {
-  return [...options]
-    .sort((left, right) => {
-      if (left.arrivalMinutes !== right.arrivalMinutes) {
-        return left.arrivalMinutes - right.arrivalMinutes;
-      }
+  const sorted = [...options].sort(compareSegmentOptions);
+  const frontier: SegmentOption[] = [];
 
-      if (left.walkMinutes !== right.walkMinutes) {
-        return left.walkMinutes - right.walkMinutes;
-      }
+  for (const option of sorted) {
+    if (frontier.some((existing) => dominatesSegmentOption(existing, option))) {
+      continue;
+    }
 
-      return left.transfers - right.transfers;
-    })
-    .slice(0, SEGMENT_OPTION_LIMIT);
+    frontier.push(option);
+    if (frontier.length >= SEGMENT_OPTION_LIMIT) {
+      break;
+    }
+  }
+
+  return frontier;
+}
+
+function prunePartialFrontier(partials: PartialItinerary[]) {
+  const bestBySignature = new Map<string, PartialItinerary>();
+  for (const partial of partials) {
+    const existing = bestBySignature.get(partial.signature);
+    if (!existing || comparePartialItineraries(partial, existing) < 0) {
+      bestBySignature.set(partial.signature, partial);
+    }
+  }
+
+  const sorted = [...bestBySignature.values()].sort(comparePartialItineraries);
+  const frontier: PartialItinerary[] = [];
+
+  for (const partial of sorted) {
+    if (frontier.some((existing) => dominatesPartialItinerary(existing, partial))) {
+      continue;
+    }
+
+    frontier.push(partial);
+    if (frontier.length >= PARTIAL_FRONTIER_LIMIT) {
+      break;
+    }
+  }
+
+  return frontier;
+}
+
+function buildRouteIndex(context: PlannerGraphContext): RoutingIndex {
+  const groupedTrips = new Map<string, TripContext[]>();
+
+  for (const trip of context.trips) {
+    const next = groupedTrips.get(trip.routePatternId) ?? [];
+    next.push(trip);
+    groupedTrips.set(trip.routePatternId, next);
+  }
+
+  const routesById = new Map<string, RouteContext>();
+  const routesByStopId = new Map<string, Array<{ routeId: string; stopIndex: number }>>();
+
+  for (const [routeId, routeTrips] of groupedTrips) {
+    const trips = [...routeTrips].sort((left, right) => {
+      const leftDeparture = left.stopTimes[0]?.departureMinutes ?? Number.POSITIVE_INFINITY;
+      const rightDeparture = right.stopTimes[0]?.departureMinutes ?? Number.POSITIVE_INFINITY;
+      return leftDeparture - rightDeparture;
+    });
+
+    const stopIds = trips[0]?.stopTimes.map((stopTime) => stopTime.stopId) ?? [];
+    if (stopIds.length === 0) {
+      continue;
+    }
+
+    routesById.set(routeId, {
+      id: routeId,
+      stopIds,
+      trips,
+    });
+
+    stopIds.forEach((stopId, stopIndex) => {
+      const next = routesByStopId.get(stopId) ?? [];
+      next.push({ routeId, stopIndex });
+      routesByStopId.set(stopId, next);
+    });
+  }
+
+  return {
+    routesById,
+    routesByStopId,
+  };
+}
+
+function findEarliestBoardableTrip(
+  route: RouteContext,
+  stopIndex: number,
+  readyAt: number,
+  searchWindowEndsAt: number,
+) {
+  let best:
+    | {
+        trip: TripContext;
+        boardStopTime: TripStopContext;
+      }
+    | null = null;
+
+  for (const trip of route.trips) {
+    const boardStopTime = trip.stopTimes[stopIndex];
+    if (!boardStopTime) {
+      continue;
+    }
+
+    if (
+      boardStopTime.departureMinutes < readyAt ||
+      boardStopTime.departureMinutes > searchWindowEndsAt
+    ) {
+      continue;
+    }
+
+    if (!best || boardStopTime.departureMinutes < best.boardStopTime.departureMinutes) {
+      best = {
+        trip,
+        boardStopTime,
+      };
+    }
+  }
+
+  return best;
 }
 
 function getSegmentSearchWindowMinutes(fromPlace: PlaceContext, toPlace: PlaceContext) {
@@ -275,15 +753,281 @@ function getSegmentSearchWindowMinutes(fromPlace: PlaceContext, toPlace: PlaceCo
   );
 }
 
+function collectRoutesToScan(labels: Map<string, StopLabel>, routingIndex: RoutingIndex) {
+  const startByRoute = new Map<string, number>();
+
+  for (const stopId of labels.keys()) {
+    for (const reference of routingIndex.routesByStopId.get(stopId) ?? []) {
+      const currentStart = startByRoute.get(reference.routeId);
+      if (currentStart === undefined || reference.stopIndex < currentStart) {
+        startByRoute.set(reference.routeId, reference.stopIndex);
+      }
+    }
+  }
+
+  return [...startByRoute.entries()]
+    .map(([routeId, startIndex]) => {
+      const route = routingIndex.routesById.get(routeId);
+      return route ? { route, startIndex } : null;
+    })
+    .filter((entry): entry is { route: RouteContext; startIndex: number } => entry !== null);
+}
+
+function relaxTransferLabels(
+  seeds: Map<string, StopLabel>,
+  context: PlannerGraphContext,
+  maxArrivalMinutes: number,
+) {
+  const best = new Map<string, StopLabel>();
+  const queue = new MinHeap<QueueEntry>(
+    (left, right) =>
+      left.arrivalMinutes - right.arrivalMinutes || left.walkMinutes - right.walkMinutes,
+  );
+
+  for (const seed of seeds.values()) {
+    if (seed.arrivalMinutes > maxArrivalMinutes) {
+      continue;
+    }
+
+    if (upsertStopLabel(best, seed)) {
+      queue.push({
+        stopId: seed.stopId,
+        arrivalMinutes: seed.arrivalMinutes,
+        walkMinutes: seed.walkMinutes,
+      });
+    }
+  }
+
+  while (queue.size > 0) {
+    const current = queue.pop();
+    if (!current) {
+      break;
+    }
+
+    const currentLabel = best.get(current.stopId);
+    if (
+      !currentLabel ||
+      currentLabel.arrivalMinutes !== current.arrivalMinutes ||
+      currentLabel.walkMinutes !== current.walkMinutes
+    ) {
+      continue;
+    }
+
+    const fromStop = context.stops.get(current.stopId);
+    for (const transfer of context.stopTransfersByOrigin.get(current.stopId) ?? []) {
+      if (!transfer.toStopId || transfer.toStopId === current.stopId) {
+        continue;
+      }
+
+      const nextArrivalMinutes = currentLabel.arrivalMinutes + transfer.durationMinutes;
+      if (nextArrivalMinutes > maxArrivalMinutes) {
+        continue;
+      }
+
+      const toStop = context.stops.get(transfer.toStopId);
+      const candidate: StopLabel = {
+        stopId: transfer.toStopId,
+        arrivalMinutes: nextArrivalMinutes,
+        walkMinutes: currentLabel.walkMinutes + transfer.durationMinutes,
+        safetyBufferCost: currentLabel.safetyBufferCost,
+        usesEstimatedStopTimes: currentLabel.usesEstimatedStopTimes,
+        realtimeEligible: currentLabel.realtimeEligible,
+        signature: `${currentLabel.signature}|walk:${current.stopId}:${transfer.toStopId}`,
+        legs: [
+          ...currentLabel.legs,
+          createTransferWalkLeg(
+            fromStop,
+            toStop,
+            current.stopId,
+            transfer.toStopId,
+            currentLabel.arrivalMinutes,
+            nextArrivalMinutes,
+          ),
+        ],
+      };
+
+      if (upsertStopLabel(best, candidate)) {
+        queue.push({
+          stopId: candidate.stopId,
+          arrivalMinutes: candidate.arrivalMinutes,
+          walkMinutes: candidate.walkMinutes,
+        });
+      }
+    }
+  }
+
+  return best;
+}
+
+function scanRoute(
+  route: RouteContext,
+  startIndex: number,
+  previousRoundLabels: Map<string, StopLabel>,
+  currentRoundSeeds: Map<string, StopLabel>,
+  round: number,
+  context: PlannerGraphContext,
+  searchWindowEndsAt: number,
+  maxArrivalMinutes: number,
+) {
+  let activeBoard:
+    | {
+        trip: TripContext;
+        boardStopTime: TripStopContext;
+        boardStopIndex: number;
+        previousLabel: StopLabel;
+      }
+    | null = null;
+
+  for (let stopIndex = startIndex; stopIndex < route.stopIds.length; stopIndex += 1) {
+    const stopId = route.stopIds[stopIndex];
+    const previousLabel = previousRoundLabels.get(stopId);
+
+    if (previousLabel) {
+      const readyAt =
+        previousLabel.arrivalMinutes + (round === 1 ? FIRST_BOARD_BUFFER : TRANSFER_BUFFER);
+      if (readyAt <= searchWindowEndsAt) {
+        const candidateBoard = findEarliestBoardableTrip(
+          route,
+          stopIndex,
+          readyAt,
+          searchWindowEndsAt,
+        );
+        if (candidateBoard) {
+          const candidateTrip = candidateBoard.trip;
+          const candidateBoardStopTime = candidateBoard.boardStopTime;
+          const candidateDeparture = candidateBoardStopTime.departureMinutes;
+          const activeDeparture = activeBoard?.trip.stopTimes[stopIndex]?.departureMinutes;
+
+          if (
+            !activeBoard ||
+              activeDeparture === undefined ||
+              candidateDeparture < activeDeparture ||
+              (candidateDeparture === activeDeparture &&
+                compareStopLabels(previousLabel, activeBoard.previousLabel) < 0)
+          ) {
+            activeBoard = {
+              trip: candidateTrip,
+              boardStopTime: candidateBoardStopTime,
+              boardStopIndex: stopIndex,
+              previousLabel,
+            };
+          }
+        }
+      }
+    }
+
+    if (!activeBoard || stopIndex <= activeBoard.boardStopIndex) {
+      continue;
+    }
+
+    const alightStopTime = activeBoard.trip.stopTimes[stopIndex];
+    if (
+      !alightStopTime ||
+      alightStopTime.arrivalMinutes > maxArrivalMinutes ||
+      alightStopTime.arrivalMinutes < activeBoard.boardStopTime.departureMinutes
+    ) {
+      continue;
+    }
+
+    const estimated = tripUsesEstimated(
+      activeBoard.trip,
+      activeBoard.boardStopTime.sequence,
+      alightStopTime.sequence,
+    );
+
+    const nextLegs = [...activeBoard.previousLabel.legs];
+    if (activeBoard.boardStopTime.departureMinutes > activeBoard.previousLabel.arrivalMinutes) {
+      nextLegs.push(
+        createWaitLeg(
+          activeBoard.boardStopTime.stopName,
+          activeBoard.boardStopTime.stopId,
+          activeBoard.previousLabel.arrivalMinutes,
+          activeBoard.boardStopTime.departureMinutes,
+        ),
+      );
+    }
+    nextLegs.push(
+      createRideLeg(activeBoard.trip, activeBoard.boardStopTime, alightStopTime, estimated),
+    );
+
+    const candidate: StopLabel = {
+      stopId: alightStopTime.stopId,
+      arrivalMinutes: alightStopTime.arrivalMinutes,
+      walkMinutes: activeBoard.previousLabel.walkMinutes,
+      safetyBufferCost:
+        activeBoard.previousLabel.safetyBufferCost +
+        (round === 1 ? FIRST_BOARD_BUFFER : TRANSFER_BUFFER) +
+        (estimated ? ESTIMATED_BUFFER : 0),
+      usesEstimatedStopTimes: activeBoard.previousLabel.usesEstimatedStopTimes || estimated,
+      realtimeEligible:
+        activeBoard.previousLabel.realtimeEligible ||
+        context.realtimePatternIds.has(activeBoard.trip.routePatternId),
+      signature: `${activeBoard.previousLabel.signature}|ride:${activeBoard.trip.id}:${activeBoard.boardStopTime.stopId}:${alightStopTime.stopId}`,
+      legs: nextLegs,
+    };
+
+    upsertStopLabel(currentRoundSeeds, candidate);
+  }
+}
+
+function collectSegmentOptions(
+  labels: Map<string, StopLabel>,
+  egressLinks: WalkLinkContext[],
+  toPlace: PlaceContext,
+  ridesUsed: number,
+  context: PlannerGraphContext,
+  maxArrivalMinutes: number,
+  bestBySignature: Map<string, SegmentOption>,
+) {
+  for (const egress of egressLinks) {
+    if (!egress.fromStopId) {
+      continue;
+    }
+
+    const label = labels.get(egress.fromStopId);
+    if (!label) {
+      continue;
+    }
+
+    const arrivalMinutes = label.arrivalMinutes + egress.durationMinutes;
+    if (arrivalMinutes > maxArrivalMinutes) {
+      continue;
+    }
+
+    const fromStop = context.stops.get(egress.fromStopId);
+    const option: SegmentOption = {
+      signature: `${label.signature}|egress:${egress.fromStopId}:${toPlace.id}`,
+      arrivalMinutes,
+      walkMinutes: label.walkMinutes + egress.durationMinutes,
+      transfers: Math.max(0, ridesUsed - 1),
+      usesEstimatedStopTimes: label.usesEstimatedStopTimes,
+      safetyBufferCost: label.safetyBufferCost,
+      realtimeEligible: label.realtimeEligible,
+      legs: [
+        ...label.legs,
+        createEgressWalkLeg(
+          fromStop,
+          egress.fromStopId,
+          toPlace,
+          label.arrivalMinutes,
+          arrivalMinutes,
+        ),
+      ],
+    };
+
+    upsertSegmentOption(bestBySignature, option);
+  }
+}
+
 function findSegmentOptions(
   currentPlaceId: string,
   nextPlaceId: string,
   earliestDepartureMinutes: number,
   context: PlannerGraphContext,
+  routingIndex: RoutingIndex,
 ): SegmentOption[] {
   const fromPlace = context.places.get(currentPlaceId);
   const toPlace = context.places.get(nextPlaceId);
-
   if (!fromPlace || !toPlace) {
     return [];
   }
@@ -302,399 +1046,193 @@ function findSegmentOptions(
       .sort((left, right) => left.rank - right.rank || left.durationMinutes - right.durationMinutes)
       .slice(0, ACCESS_STOP_LIMIT) ?? [];
 
-  const collected: SegmentOption[] = [];
-  const bestBySignature = new Map<string, SegmentOption>();
+  if (accessLinks.length === 0 || egressLinks.length === 0) {
+    return [];
+  }
+
   const searchWindowEndsAt =
     earliestDepartureMinutes + getSegmentSearchWindowMinutes(fromPlace, toPlace);
+  const maxArrivalMinutes = earliestDepartureMinutes + MAX_SEGMENT_RESULT_DURATION_MINUTES;
 
+  const accessSeeds = new Map<string, StopLabel>();
   for (const access of accessLinks) {
     if (!access.toStopId) {
       continue;
     }
 
-    const walkToStopEndsAt = earliestDepartureMinutes + access.durationMinutes;
-    const firstRideReadyAt = walkToStopEndsAt + FIRST_BOARD_BUFFER;
+    const toStop = context.stops.get(access.toStopId);
+    const candidate: StopLabel = {
+      stopId: access.toStopId,
+      arrivalMinutes: earliestDepartureMinutes + access.durationMinutes,
+      walkMinutes: access.durationMinutes,
+      safetyBufferCost: 0,
+      usesEstimatedStopTimes: false,
+      realtimeEligible: false,
+      signature: `access:${currentPlaceId}:${access.toStopId}`,
+      legs: [
+        createAccessWalkLeg(
+          fromPlace,
+          toStop,
+          access.toStopId,
+          earliestDepartureMinutes,
+          earliestDepartureMinutes + access.durationMinutes,
+        ),
+      ],
+    };
 
-    for (const egress of egressLinks) {
-      if (!egress.fromStopId) {
+    upsertStopLabel(accessSeeds, candidate);
+  }
+
+  let previousRoundLabels = relaxTransferLabels(accessSeeds, context, maxArrivalMinutes);
+  const bestBySignature = new Map<string, SegmentOption>();
+
+  for (let round = 1; round <= MAX_RIDE_ROUNDS; round += 1) {
+    const routesToScan = collectRoutesToScan(previousRoundLabels, routingIndex);
+    if (routesToScan.length === 0) {
+      break;
+    }
+
+    const roundSeeds = new Map<string, StopLabel>();
+    for (const { route, startIndex } of routesToScan) {
+      scanRoute(
+        route,
+        startIndex,
+        previousRoundLabels,
+        roundSeeds,
+        round,
+        context,
+        searchWindowEndsAt,
+        maxArrivalMinutes,
+      );
+    }
+
+    if (roundSeeds.size === 0) {
+      break;
+    }
+
+    previousRoundLabels = relaxTransferLabels(roundSeeds, context, maxArrivalMinutes);
+    collectSegmentOptions(
+      previousRoundLabels,
+      egressLinks,
+      toPlace,
+      round,
+      context,
+      maxArrivalMinutes,
+      bestBySignature,
+    );
+  }
+
+  return sortSegmentOptions([...bestBySignature.values()]);
+}
+
+function buildItineraries(input: PlannerEngineInput, context: PlannerGraphContext): ItineraryDraft[] {
+  const startAt = new Date(input.startAt);
+  const serviceStartMinutes = toServiceMinutes(startAt);
+  const routingIndex = buildRouteIndex(context);
+  const segmentCache = new Map<string, SegmentOption[]>();
+  const finished: PartialItinerary[] = [];
+
+  let frontier: PartialItinerary[] = [
+    {
+      signature: "",
+      currentMinutes: serviceStartMinutes,
+      metrics: {
+        totalWalkMinutes: 0,
+        transfers: 0,
+        usesEstimatedStopTimes: false,
+        safetyBufferCost: 0,
+        realtimeEligible: false,
+      },
+      legs: [],
+    },
+  ];
+
+  for (let index = 0; index < input.places.length; index += 1) {
+    const currentPlaceInput = input.places[index];
+    const currentPlace = context.places.get(currentPlaceInput.placeId);
+    if (!currentPlace) {
+      continue;
+    }
+
+    const nextFrontier: PartialItinerary[] = [];
+    for (const partial of frontier) {
+      const visitLeg = createVisitLeg(
+        currentPlace.id,
+        currentPlace.displayName,
+        partial.currentMinutes,
+        currentPlaceInput.dwellMinutes,
+      );
+      const visitedPartial: PartialItinerary = {
+        signature: partial.signature
+          ? `${partial.signature}|visit:${currentPlace.id}`
+          : `visit:${currentPlace.id}`,
+        currentMinutes: visitLeg.endMinutes,
+        metrics: partial.metrics,
+        legs: [...partial.legs, visitLeg],
+      };
+
+      if (index === input.places.length - 1) {
+        finished.push(visitedPartial);
         continue;
       }
 
-      for (const trip of context.trips) {
-        const board = trip.stopTimeByStopId.get(access.toStopId);
-        const alight = trip.stopTimeByStopId.get(egress.fromStopId);
-
-        if (!board || !alight || board.sequence >= alight.sequence) {
-          continue;
-        }
-
-        if (
-          board.departureMinutes < firstRideReadyAt ||
-          board.departureMinutes > searchWindowEndsAt
-        ) {
-          continue;
-        }
-
-        const estimated = tripUsesEstimated(trip, board.sequence, alight.sequence);
-        const walkOutEndsAt = alight.arrivalMinutes + egress.durationMinutes;
-        const legs: DraftLeg[] = [
-          {
-            kind: "walk",
-            title: `${fromPlace.displayName}에서 ${context.stops.get(access.toStopId)?.displayName ?? access.toStopId}까지 도보`,
-            startMinutes: earliestDepartureMinutes,
-            endMinutes: walkToStopEndsAt,
-            fromLabel: fromPlace.displayName,
-            toLabel: context.stops.get(access.toStopId)?.displayName ?? access.toStopId,
-            toStopId: access.toStopId,
-          },
-        ];
-
-        if (board.departureMinutes > walkToStopEndsAt) {
-          legs.push({
-            kind: "wait",
-            title: `${context.stops.get(access.toStopId)?.displayName ?? access.toStopId}에서 버스 대기`,
-            startMinutes: walkToStopEndsAt,
-            endMinutes: board.departureMinutes,
-            fromLabel: context.stops.get(access.toStopId)?.displayName ?? access.toStopId,
-            toLabel: context.stops.get(access.toStopId)?.displayName ?? access.toStopId,
-            fromStopId: access.toStopId,
-            toStopId: access.toStopId,
-          });
-        }
-
-        legs.push({
-          kind: "ride",
-          title: `${trip.routeShortName}번 탑승`,
-          subtitle: `${context.stops.get(access.toStopId)?.displayName ?? access.toStopId} → ${context.stops.get(egress.fromStopId)?.displayName ?? egress.fromStopId}`,
-          startMinutes: board.departureMinutes,
-          endMinutes: alight.arrivalMinutes,
-          fromLabel: context.stops.get(access.toStopId)?.displayName ?? access.toStopId,
-          toLabel: context.stops.get(egress.fromStopId)?.displayName ?? egress.fromStopId,
-          routeShortName: trip.routeShortName,
-          routePatternId: trip.routePatternId,
-          tripId: trip.id,
-          fromStopId: access.toStopId,
-          toStopId: egress.fromStopId,
-          estimated,
-        });
-
-        legs.push({
-          kind: "walk",
-          title: `${context.stops.get(egress.fromStopId)?.displayName ?? egress.fromStopId}에서 ${toPlace.displayName}까지 도보`,
-          startMinutes: alight.arrivalMinutes,
-          endMinutes: walkOutEndsAt,
-          fromLabel: context.stops.get(egress.fromStopId)?.displayName ?? egress.fromStopId,
-          toLabel: toPlace.displayName,
-          fromStopId: egress.fromStopId,
-        });
-
-        pushUniqueSegment(
-          collected,
-          {
-            signature: `direct:${trip.id}:${access.toStopId}:${egress.fromStopId}`,
-            arrivalMinutes: walkOutEndsAt,
-            walkMinutes: access.durationMinutes + egress.durationMinutes,
-            transfers: 0,
-            usesEstimatedStopTimes: estimated,
-            safetyBufferCost: FIRST_BOARD_BUFFER + (estimated ? ESTIMATED_BUFFER : 0),
-            realtimeEligible: context.realtimePatternIds.has(trip.routePatternId),
-            legs,
-          },
-          bestBySignature,
+      const nextPlaceInput = input.places[index + 1];
+      const cacheKey = `${currentPlace.id}|${nextPlaceInput.placeId}|${visitedPartial.currentMinutes}`;
+      let segmentOptions = segmentCache.get(cacheKey);
+      if (!segmentOptions) {
+        segmentOptions = findSegmentOptions(
+          currentPlace.id,
+          nextPlaceInput.placeId,
+          visitedPartial.currentMinutes,
+          context,
+          routingIndex,
         );
+        segmentCache.set(cacheKey, segmentOptions);
       }
 
-      for (const firstTrip of context.trips) {
-        const boardFirst = firstTrip.stopTimeByStopId.get(access.toStopId);
-        if (!boardFirst || boardFirst.departureMinutes < firstRideReadyAt) {
-          continue;
-        }
+      for (const option of segmentOptions.slice(0, SEGMENT_OPTIONS_PER_PARTIAL)) {
+        nextFrontier.push({
+          signature: `${visitedPartial.signature}|${option.signature}`,
+          currentMinutes: option.arrivalMinutes,
+          metrics: {
+            totalWalkMinutes: visitedPartial.metrics.totalWalkMinutes + option.walkMinutes,
+            transfers: visitedPartial.metrics.transfers + option.transfers,
+            usesEstimatedStopTimes:
+              visitedPartial.metrics.usesEstimatedStopTimes || option.usesEstimatedStopTimes,
+            safetyBufferCost: visitedPartial.metrics.safetyBufferCost + option.safetyBufferCost,
+            realtimeEligible:
+              visitedPartial.metrics.realtimeEligible || option.realtimeEligible,
+          },
+          legs: [...visitedPartial.legs, ...option.legs],
+        });
+      }
+    }
 
-        for (const transferStop of firstTrip.stopTimes.filter(
-          (stopTime) => stopTime.sequence > boardFirst.sequence,
-        )) {
-          const transferMoves: WalkLinkContext[] = [
-            {
-              kind: "STOP_STOP",
-              fromPlaceId: null,
-              toPlaceId: null,
-              fromStopId: transferStop.stopId,
-              toStopId: transferStop.stopId,
-              durationMinutes: 0,
-              distanceMeters: 0,
-              rank: 0,
-            },
-            ...(context.stopTransfersByOrigin.get(transferStop.stopId) ?? []),
-          ];
-
-          for (const transferMove of transferMoves) {
-            if (!transferMove.toStopId) {
-              continue;
-            }
-
-            const transferWalkEndsAt =
-              transferStop.arrivalMinutes + transferMove.durationMinutes + TRANSFER_BUFFER;
-
-            for (const secondTrip of context.trips) {
-              if (secondTrip.id === firstTrip.id) {
-                continue;
-              }
-
-              const boardSecond = secondTrip.stopTimeByStopId.get(transferMove.toStopId);
-              const alightSecond = secondTrip.stopTimeByStopId.get(egress.fromStopId);
-
-              if (
-                !boardSecond ||
-                !alightSecond ||
-                boardSecond.sequence >= alightSecond.sequence
-              ) {
-                continue;
-              }
-
-              if (
-                boardSecond.departureMinutes < transferWalkEndsAt ||
-                boardSecond.departureMinutes > searchWindowEndsAt
-              ) {
-                continue;
-              }
-
-              const firstEstimated = tripUsesEstimated(
-                firstTrip,
-                boardFirst.sequence,
-                transferStop.sequence,
-              );
-              const secondEstimated = tripUsesEstimated(
-                secondTrip,
-                boardSecond.sequence,
-                alightSecond.sequence,
-              );
-              const walkOutEndsAt = alightSecond.arrivalMinutes + egress.durationMinutes;
-              const legs: DraftLeg[] = [
-                {
-                  kind: "walk",
-                  title: `${fromPlace.displayName}에서 ${context.stops.get(access.toStopId)?.displayName ?? access.toStopId}까지 도보`,
-                  startMinutes: earliestDepartureMinutes,
-                  endMinutes: walkToStopEndsAt,
-                  fromLabel: fromPlace.displayName,
-                  toLabel: context.stops.get(access.toStopId)?.displayName ?? access.toStopId,
-                  toStopId: access.toStopId,
-                },
-              ];
-
-              if (boardFirst.departureMinutes > walkToStopEndsAt) {
-                legs.push({
-                  kind: "wait",
-                  title: `${context.stops.get(access.toStopId)?.displayName ?? access.toStopId}에서 버스 대기`,
-                  startMinutes: walkToStopEndsAt,
-                  endMinutes: boardFirst.departureMinutes,
-                  fromLabel: context.stops.get(access.toStopId)?.displayName ?? access.toStopId,
-                  toLabel: context.stops.get(access.toStopId)?.displayName ?? access.toStopId,
-                  fromStopId: access.toStopId,
-                  toStopId: access.toStopId,
-                });
-              }
-
-              legs.push({
-                kind: "ride",
-                title: `${firstTrip.routeShortName}번 탑승`,
-                subtitle: `${context.stops.get(access.toStopId)?.displayName ?? access.toStopId} → ${transferStop.stopName}`,
-                startMinutes: boardFirst.departureMinutes,
-                endMinutes: transferStop.arrivalMinutes,
-                fromLabel: context.stops.get(access.toStopId)?.displayName ?? access.toStopId,
-                toLabel: transferStop.stopName,
-                routeShortName: firstTrip.routeShortName,
-                routePatternId: firstTrip.routePatternId,
-                tripId: firstTrip.id,
-                fromStopId: access.toStopId,
-                toStopId: transferStop.stopId,
-                estimated: firstEstimated,
-              });
-
-              if (transferMove.durationMinutes > 0) {
-                legs.push({
-                  kind: "walk",
-                  title: `${transferStop.stopName}에서 ${context.stops.get(transferMove.toStopId)?.displayName ?? transferMove.toStopId}까지 환승 도보`,
-                  startMinutes: transferStop.arrivalMinutes,
-                  endMinutes: transferStop.arrivalMinutes + transferMove.durationMinutes,
-                  fromLabel: transferStop.stopName,
-                  toLabel: context.stops.get(transferMove.toStopId)?.displayName ?? transferMove.toStopId,
-                  fromStopId: transferStop.stopId,
-                  toStopId: transferMove.toStopId,
-                });
-              }
-
-              const secondWaitStartsAt = transferStop.arrivalMinutes + transferMove.durationMinutes;
-              if (boardSecond.departureMinutes > secondWaitStartsAt) {
-                legs.push({
-                  kind: "wait",
-                  title: `${context.stops.get(transferMove.toStopId)?.displayName ?? transferMove.toStopId}에서 환승 대기`,
-                  startMinutes: secondWaitStartsAt,
-                  endMinutes: boardSecond.departureMinutes,
-                  fromLabel: context.stops.get(transferMove.toStopId)?.displayName ?? transferMove.toStopId,
-                  toLabel: context.stops.get(transferMove.toStopId)?.displayName ?? transferMove.toStopId,
-                  fromStopId: transferMove.toStopId,
-                  toStopId: transferMove.toStopId,
-                });
-              }
-
-              legs.push({
-                kind: "ride",
-                title: `${secondTrip.routeShortName}번 환승`,
-                subtitle: `${context.stops.get(transferMove.toStopId)?.displayName ?? transferMove.toStopId} → ${context.stops.get(egress.fromStopId)?.displayName ?? egress.fromStopId}`,
-                startMinutes: boardSecond.departureMinutes,
-                endMinutes: alightSecond.arrivalMinutes,
-                fromLabel: context.stops.get(transferMove.toStopId)?.displayName ?? transferMove.toStopId,
-                toLabel: context.stops.get(egress.fromStopId)?.displayName ?? egress.fromStopId,
-                routeShortName: secondTrip.routeShortName,
-                routePatternId: secondTrip.routePatternId,
-                tripId: secondTrip.id,
-                fromStopId: transferMove.toStopId,
-                toStopId: egress.fromStopId,
-                estimated: secondEstimated,
-              });
-
-              legs.push({
-                kind: "walk",
-                title: `${context.stops.get(egress.fromStopId)?.displayName ?? egress.fromStopId}에서 ${toPlace.displayName}까지 도보`,
-                startMinutes: alightSecond.arrivalMinutes,
-                endMinutes: walkOutEndsAt,
-                fromLabel: context.stops.get(egress.fromStopId)?.displayName ?? egress.fromStopId,
-                toLabel: toPlace.displayName,
-                fromStopId: egress.fromStopId,
-              });
-
-              pushUniqueSegment(
-                collected,
-                {
-                  signature: `transfer:${firstTrip.id}:${transferStop.stopId}:${secondTrip.id}:${transferMove.toStopId}:${egress.fromStopId}`,
-                  arrivalMinutes: walkOutEndsAt,
-                  walkMinutes:
-                    access.durationMinutes +
-                    transferMove.durationMinutes +
-                    egress.durationMinutes,
-                  transfers: 1,
-                  usesEstimatedStopTimes: firstEstimated || secondEstimated,
-                  safetyBufferCost:
-                    FIRST_BOARD_BUFFER +
-                    TRANSFER_BUFFER +
-                    ((firstEstimated || secondEstimated) ? ESTIMATED_BUFFER : 0),
-                  realtimeEligible:
-                    context.realtimePatternIds.has(firstTrip.routePatternId) ||
-                    context.realtimePatternIds.has(secondTrip.routePatternId),
-                  legs,
-                },
-                bestBySignature,
-              );
-            }
-          }
-        }
+    if (index < input.places.length - 1) {
+      frontier = prunePartialFrontier(nextFrontier);
+      if (frontier.length === 0) {
+        break;
       }
     }
   }
 
-  return sortSegmentOptions(collected);
-}
-
-function buildItineraries(
-  input: PlannerEngineInput,
-  context: PlannerGraphContext,
-): ItineraryDraft[] {
-  const startAt = new Date(input.startAt);
-  const serviceStartMinutes = toServiceMinutes(startAt);
-  const finished: ItineraryDraft[] = [];
-  const lastIndex = input.places.length - 1;
-
-  const dfs = (
-    index: number,
-    currentMinutes: number,
-    legs: DraftLeg[],
-    metrics: Omit<CandidateMetrics, "totalDurationMinutes" | "finalArrivalMinutes">,
-    signatureParts: string[],
-  ) => {
-    if (finished.length >= BRANCH_LIMIT) {
-      return;
-    }
-
-    const currentPlaceInput = input.places[index];
-    const currentPlace = context.places.get(currentPlaceInput.placeId);
-    if (!currentPlace) {
-      return;
-    }
-
-    const visitLeg = createVisitLeg(
-      currentPlace.id,
-      currentPlace.displayName,
-      currentMinutes,
-      currentPlaceInput.dwellMinutes,
-    );
-    const withVisit = [...legs, visitLeg];
-    const departAfterVisit = visitLeg.endMinutes;
-
-    if (index === lastIndex) {
-      finished.push({
-        signature: [...signatureParts, `visit:${currentPlace.id}`].join("|"),
-        metrics: {
-          ...metrics,
-          totalDurationMinutes: departAfterVisit - serviceStartMinutes,
-          finalArrivalMinutes: departAfterVisit,
-        },
-        legs: withVisit,
-      });
-      return;
-    }
-
-    const nextPlaceInput = input.places[index + 1];
-    const segmentOptions = findSegmentOptions(
-      currentPlaceInput.placeId,
-      nextPlaceInput.placeId,
-      departAfterVisit,
-      context,
-    ).slice(0, 3);
-
-    for (const option of segmentOptions) {
-      dfs(
-        index + 1,
-        option.arrivalMinutes,
-        [...withVisit, ...option.legs],
-        {
-          totalWalkMinutes: metrics.totalWalkMinutes + option.walkMinutes,
-          transfers: metrics.transfers + option.transfers,
-          usesEstimatedStopTimes:
-            metrics.usesEstimatedStopTimes || option.usesEstimatedStopTimes,
-          safetyBufferCost: metrics.safetyBufferCost + option.safetyBufferCost,
-          realtimeEligible: metrics.realtimeEligible || option.realtimeEligible,
-        },
-        [...signatureParts, option.signature],
-      );
-    }
-  };
-
-  dfs(
-    0,
-    serviceStartMinutes,
-    [],
-    {
-      totalWalkMinutes: 0,
-      transfers: 0,
-      usesEstimatedStopTimes: false,
-      safetyBufferCost: 0,
-      realtimeEligible: false,
-    },
-    [],
-  );
-
-  const deduped = new Map<string, ItineraryDraft>();
+  const deduped = new Map<string, PartialItinerary>();
   for (const itinerary of finished) {
     const existing = deduped.get(itinerary.signature);
-    if (
-      !existing ||
-      itinerary.metrics.finalArrivalMinutes < existing.metrics.finalArrivalMinutes
-    ) {
+    if (!existing || comparePartialItineraries(itinerary, existing) < 0) {
       deduped.set(itinerary.signature, itinerary);
     }
   }
 
-  return [...deduped.values()];
+  return [...deduped.values()].map((itinerary) => ({
+    signature: itinerary.signature,
+    metrics: {
+      ...itinerary.metrics,
+      totalDurationMinutes: itinerary.currentMinutes - serviceStartMinutes,
+      finalArrivalMinutes: itinerary.currentMinutes,
+    },
+    legs: itinerary.legs,
+  }));
 }
 
 export function buildPlannerCandidates(

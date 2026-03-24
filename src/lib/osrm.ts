@@ -1,3 +1,8 @@
+import {
+  DependencyUnavailableError,
+  RouteNotFoundError,
+} from "@/lib/errors";
+
 type Coordinate = {
   latitude: number;
   longitude: number;
@@ -26,8 +31,8 @@ export function haversineMeters(from: Coordinate, to: Coordinate) {
   return Math.round(2 * earthRadius * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-export function estimateWalkFromDistance(distanceMeters: number) {
-  return Math.max(2, Math.round(distanceMeters / 75));
+function compactErrorDetail(value: string) {
+  return value.replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
 export async function getWalkRoute(
@@ -38,22 +43,39 @@ export async function getWalkRoute(
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
   const url = `${normalizedBaseUrl}/route/v1/foot/${from.longitude},${from.latitude};${to.longitude},${to.latitude}?overview=false`;
 
-  const response = await fetch(url, {
-    cache: "no-store",
-    headers: {
-      Accept: "application/json",
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      cache: "no-store",
+      headers: {
+        Accept: "application/json",
+      },
+    });
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : "unknown network error";
+    throw new DependencyUnavailableError(
+      `OSRM 도보 경로 서버(${normalizedBaseUrl})에 연결하지 못했습니다. 원인: ${cause}`,
+    );
+  }
 
   if (!response.ok) {
-    throw new Error(`OSRM request failed: ${response.status} ${response.statusText}`);
+    const bodyText = compactErrorDetail(await response.text());
+    throw new DependencyUnavailableError(
+      `OSRM 도보 경로 서버가 ${response.status} ${response.statusText}를 반환했습니다.${bodyText ? ` 원인: ${bodyText}` : ""}`,
+    );
   }
 
   const payload = (await response.json()) as OsrmRouteResponse;
   const route = payload.routes?.[0];
 
-  if (!route?.distance || !route.duration) {
-    throw new Error("OSRM response did not include a valid route.");
+  if (payload.code === "NoRoute") {
+    throw new RouteNotFoundError("OSRM이 두 지점 사이의 도보 경로를 찾지 못했습니다.");
+  }
+
+  if (route?.distance == null || route.duration == null) {
+    throw new DependencyUnavailableError(
+      "OSRM 응답에 유효한 도보 경로가 포함되지 않았습니다.",
+    );
   }
 
   return {

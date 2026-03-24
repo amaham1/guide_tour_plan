@@ -25,7 +25,7 @@ function envList(name: string, fallback: string[] = []) {
 
 export const appEnv = {
   dataGoKrServiceKey: env("DATA_GO_KR_SERVICE_KEY"),
-  osrmBaseUrl: env("OSRM_BASE_URL", "http://osrm:5000"),
+  osrmBaseUrl: env("OSRM_BASE_URL", "http://localhost:5000"),
   enableInternalAdmin: envFlag("ENABLE_INTERNAL_ADMIN", false),
   busJejuBaseUrl: env("BUS_JEJU_BASE_URL", "https://bus.jeju.go.kr"),
   kakaoRestApiKey: env("KAKAO_REST_API_KEY"),
