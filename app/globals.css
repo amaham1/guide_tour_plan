@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --background: #f7efe0;
+  --foreground: #12212d;
+  --muted: #5c6b73;
+  --card: rgba(255, 249, 240, 0.82);
+  --card-strong: rgba(255, 248, 235, 0.96);
+  --line: rgba(18, 33, 45, 0.09);
+  --accent: #0d6e6e;
+  --accent-strong: #0a5151;
+  --warm: #ff7f50;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(244, 173, 99, 0.35), transparent 34%),
+    radial-gradient(circle at top right, rgba(13, 110, 110, 0.18), transparent 30%),
+    linear-gradient(180deg, #f7efe0 0%, #fef9ef 55%, #f5efe4 100%);
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  color: var(--foreground);
+  background: transparent;
+  font-family: var(--font-body), "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(13, 110, 110, 0.18);
+}

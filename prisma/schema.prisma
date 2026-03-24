@@ -1,0 +1,328 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum SourceKind {
+  OPEN_API
+  FILE_DATA
+  HTML_PAGE
+  JSON_FEED
+  INTERNAL_JOB
+}
+
+enum IngestRunStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+enum PlaceKind {
+  TOUR
+  FOOD
+  STAY
+}
+
+enum PlanPreference {
+  FASTEST
+  LEAST_WALK
+  LEAST_TRANSFER
+}
+
+enum SessionStatus {
+  ACTIVE
+  COMPLETED
+  FAILED
+}
+
+model Place {
+  id              String           @id
+  slug            String           @unique
+  category        PlaceKind
+  baseDisplayName String
+  regionName      String
+  latitude        Float
+  longitude       Float
+  sourceContentId String?          @unique
+  sourceUrl       String?
+  openingHoursRaw String?
+  openingHoursJson Json?
+  locales         PlaceLocale[]
+  tourDetail      PlaceTourDetail?
+  foodDetail      PlaceFoodDetail?
+  stayDetail      PlaceStayDetail?
+  walkFromLinks   WalkLink[]       @relation("PlaceOrigin")
+  walkToLinks     WalkLink[]       @relation("PlaceDestination")
+  planPlaces      PlanQueryPlace[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+model PlaceLocale {
+  id            String  @id @default(cuid())
+  placeId       String
+  language      String
+  displayName   String
+  summary       String?
+  categoryLabel String?
+  place         Place   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@unique([placeId, language])
+}
+
+model PlaceTourDetail {
+  id              String  @id @default(cuid())
+  placeId         String  @unique
+  themeLabel      String?
+  stayMinutesHint Int?
+  place           Place   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+}
+
+model PlaceFoodDetail {
+  id          String  @id @default(cuid())
+  placeId     String  @unique
+  signature   String?
+  openingNote String?
+  place       Place   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+}
+
+model PlaceStayDetail {
+  id            String  @id @default(cuid())
+  placeId       String  @unique
+  nightlyBudget String?
+  checkInWindow String?
+  place         Place   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+}
+
+model Stop {
+  id                String             @id
+  displayName       String
+  regionName        String
+  latitude          Float
+  longitude         Float
+  translations      StopTranslation[]
+  routePatternStops RoutePatternStop[]
+  stopTimes         StopTime[]
+  walkFromLinks     WalkLink[]         @relation("StopOrigin")
+  walkToLinks       WalkLink[]         @relation("StopDestination")
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+}
+
+model StopTranslation {
+  id          String @id @default(cuid())
+  stopId      String
+  language    String
+  displayName String
+  stop        Stop   @relation(fields: [stopId], references: [id], onDelete: Cascade)
+
+  @@unique([stopId, language])
+}
+
+model Route {
+  id          String         @id
+  shortName   String
+  displayName String
+  patterns    RoutePattern[]
+  createdAt   DateTime       @default(now())
+}
+
+model RoutePattern {
+  id               String             @id
+  routeId          String
+  scheduleId       String?            @unique
+  busType          Int?
+  directionLabel   String
+  displayName      String
+  viaText          String?
+  waypointText     String?
+  serviceNote      String?
+  effectiveDate    DateTime?
+  route            Route              @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  stops            RoutePatternStop[]
+  trips            Trip[]
+  vehicleDeviceMap VehicleDeviceMap?
+}
+
+model RoutePatternStop {
+  id                String       @id @default(cuid())
+  routePatternId    String
+  stopId            String
+  sequence          Int
+  distanceFromStart Int
+  routePattern      RoutePattern @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+  stop              Stop         @relation(fields: [stopId], references: [id], onDelete: Cascade)
+
+  @@unique([routePatternId, sequence])
+}
+
+model ServiceCalendar {
+  id       String @id
+  label    String
+  weekdays String
+  trips    Trip[]
+}
+
+model Trip {
+  id                String          @id
+  routePatternId    String
+  serviceCalendarId String
+  headsign          String
+  startTime         String
+  rowLabel          String?
+  routePattern      RoutePattern    @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+  serviceCalendar   ServiceCalendar @relation(fields: [serviceCalendarId], references: [id], onDelete: Cascade)
+  stopTimes         StopTime[]
+}
+
+model StopTime {
+  id               String  @id @default(cuid())
+  tripId           String
+  stopId           String
+  sequence         Int
+  arrivalMinutes   Int
+  departureMinutes Int
+  isEstimated      Boolean @default(false)
+  trip             Trip    @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  stop             Stop    @relation(fields: [stopId], references: [id], onDelete: Cascade)
+
+  @@unique([tripId, sequence])
+  @@index([stopId, departureMinutes])
+}
+
+model WalkLink {
+  id              String  @id @default(cuid())
+  kind            String
+  fromPlaceId     String?
+  toPlaceId       String?
+  fromStopId      String?
+  toStopId        String?
+  durationMinutes Int
+  distanceMeters  Int
+  rank            Int     @default(1)
+  isPrecomputed   Boolean @default(true)
+  fromPlace       Place?  @relation("PlaceOrigin", fields: [fromPlaceId], references: [id], onDelete: Cascade)
+  toPlace         Place?  @relation("PlaceDestination", fields: [toPlaceId], references: [id], onDelete: Cascade)
+  fromStop        Stop?   @relation("StopOrigin", fields: [fromStopId], references: [id], onDelete: Cascade)
+  toStop          Stop?   @relation("StopDestination", fields: [toStopId], references: [id], onDelete: Cascade)
+
+  @@index([fromPlaceId])
+  @@index([toPlaceId])
+  @@index([fromStopId])
+  @@index([toStopId])
+}
+
+model VehicleDeviceMap {
+  id              String       @id @default(cuid())
+  routePatternId  String       @unique
+  deviceId        String
+  externalRouteId String?
+  confidence      Float        @default(1)
+  refreshedAt     DateTime
+  routePattern    RoutePattern @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+}
+
+model PlanQuery {
+  id         String           @id @default(cuid())
+  language   String
+  startAt    DateTime
+  preference PlanPreference?
+  status     String           @default("READY")
+  places     PlanQueryPlace[]
+  candidates PlanCandidate[]
+  createdAt  DateTime         @default(now())
+}
+
+model PlanQueryPlace {
+  id                    String    @id @default(cuid())
+  planQueryId           String
+  placeId               String?
+  externalProvider      String?
+  externalRef           String?
+  externalDisplayName   String?
+  externalRegionName    String?
+  externalCategoryLabel String?
+  externalLatitude      Float?
+  externalLongitude     Float?
+  sequence              Int
+  dwellMinutes          Int
+  planQuery             PlanQuery @relation(fields: [planQueryId], references: [id], onDelete: Cascade)
+  place                 Place?    @relation(fields: [placeId], references: [id], onDelete: SetNull)
+
+  @@unique([planQueryId, sequence])
+  @@index([placeId])
+}
+
+model PlanCandidate {
+  id          String             @id @default(cuid())
+  planQueryId String
+  kind        PlanPreference
+  score       Float
+  summary     Json
+  legs        Json
+  warnings    Json?
+  createdAt   DateTime           @default(now())
+  planQuery   PlanQuery          @relation(fields: [planQueryId], references: [id], onDelete: Cascade)
+  sessions    ExecutionSession[]
+}
+
+model ExecutionSession {
+  id                  String        @id @default(cuid())
+  planCandidateId     String
+  status              SessionStatus @default(ACTIVE)
+  snapshot            Json
+  currentLegIndex     Int           @default(0)
+  lastRealtimeApplied Boolean       @default(false)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  planCandidate       PlanCandidate @relation(fields: [planCandidateId], references: [id], onDelete: Cascade)
+}
+
+model DataSource {
+  id          String      @id @default(cuid())
+  key         String      @unique
+  name        String
+  description String
+  sourceKind  SourceKind
+  officialUrl String
+  guideUrl    String?
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  jobs        IngestJob[]
+}
+
+model IngestJob {
+  id               String      @id @default(cuid())
+  key              String      @unique
+  name             String
+  scheduleLabel    String
+  sourceId         String
+  isActive         Boolean     @default(true)
+  lastSuccessfulAt DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  source           DataSource  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  runs             IngestRun[]
+}
+
+model IngestRun {
+  id            String          @id @default(cuid())
+  jobId          String
+  status         IngestRunStatus
+  triggeredBy    String
+  startedAt      DateTime        @default(now())
+  endedAt        DateTime?
+  processedCount Int             @default(0)
+  successCount   Int             @default(0)
+  failureCount   Int             @default(0)
+  errorSummary   String?
+  meta           Json?
+  job            IngestJob       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, startedAt])
+}
