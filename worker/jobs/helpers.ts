@@ -108,6 +108,18 @@ const stopNameAliasMap = new Map<string, string[]>([
   [normalizeNameKey("삼달"), ["삼달리"]],
 ]);
 
+for (const [canonical, aliases] of [
+  ["\uC81C\uC8FC\uD130\uBBF8\uB110", ["\uC81C\uC8FC\uBC84\uC2A4\uD130\uBBF8\uB110"]],
+  ["\uC131\uC0B0\uD56D", ["\uC131\uC0B0\uD3EC\uD56D"]],
+  ["\uC911\uC559\uB85C\uD130\uB9AC", ["\uC911\uC559R"]],
+  ["\uC81C\uC8FC\uBBFC\uC18D\uCD0C", ["\uD45C\uC120(\uC81C\uC8FC\uBBFC\uC18D\uCD0C)"]],
+  ["\uC81C\uC8FC\uB300\uD559\uAD50\uBCD1\uC6D0", ["\uC81C\uB300\uBCD1\uC6D0"]],
+] as const) {
+  const key = normalizeNameKey(canonical);
+  const current = stopNameAliasMap.get(key) ?? [];
+  stopNameAliasMap.set(key, [...new Set([...current, ...aliases])]);
+}
+
 function expandStopAliases(value: string) {
   const directKey = normalizeNameKey(value);
   const aliases = stopNameAliasMap.get(directKey) ?? [];

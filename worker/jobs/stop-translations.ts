@@ -1,10 +1,6 @@
 import * as XLSX from "xlsx";
 import { loadJsonSource, loadWorkbook } from "@/worker/core/files";
 import type { WorkerRuntime } from "@/worker/core/runtime";
-import {
-  fetchBusJejuStations,
-  type BusJejuStationRecord,
-} from "@/worker/jobs/bus-jeju-live";
 import { normalizeNameKey, normalizeText } from "@/worker/jobs/helpers";
 import type { JobOutcome } from "@/worker/jobs/types";
 
@@ -43,44 +39,27 @@ function parseStopTranslationsJson(rows: Record<string, unknown>[]) {
     ));
 }
 
-function parseStopTranslationsFromBusJeju(rows: BusJejuStationRecord[]) {
-  return rows.flatMap<NormalizedStopTranslation>((row) => {
-    const stopKey = normalizeNameKey(row.stationId);
-    if (!stopKey) {
-      return [];
-    }
-
-    return [
-      { language: "en", displayName: normalizeText(row.stationEngNm) },
-      { language: "zh", displayName: normalizeText(row.stationChnNm) },
-      { language: "ja", displayName: normalizeText(row.stationJpnNm) },
-    ]
-      .filter((translation) => translation.displayName)
-      .map((translation) => ({
-        stopKey,
-        language: translation.language,
-        displayName: translation.displayName,
-      }));
-  });
-}
-
 export async function runStopTranslationsJob(
   runtime: WorkerRuntime,
 ): Promise<JobOutcome> {
-  const source = runtime.env.stopTranslationsXlsxPath
-    ? runtime.env.stopTranslationsXlsxPath
-    : `${runtime.env.busJejuBaseUrl}/data/search/stationListByBounds`;
+  if (!runtime.env.stopTranslationsXlsxPath) {
+    return {
+      processedCount: 0,
+      successCount: 0,
+      failureCount: 0,
+      meta: {
+        source: "overlay-disabled",
+      },
+    };
+  }
 
-  const value = runtime.env.stopTranslationsXlsxPath
-    ? await (runtime.env.stopTranslationsXlsxPath.toLowerCase().endsWith(".json")
-        ? loadJsonSource<Record<string, unknown>[]>(runtime.env.stopTranslationsXlsxPath)
-        : loadWorkbook(runtime.env.stopTranslationsXlsxPath))
-    : await fetchBusJejuStations(runtime);
+  const source = runtime.env.stopTranslationsXlsxPath;
+  const value = await (runtime.env.stopTranslationsXlsxPath.toLowerCase().endsWith(".json")
+    ? loadJsonSource<Record<string, unknown>[]>(runtime.env.stopTranslationsXlsxPath)
+    : loadWorkbook(runtime.env.stopTranslationsXlsxPath));
 
   const rows = Array.isArray(value)
-    ? ("stationNm" in (value[0] ?? {})
-        ? parseStopTranslationsFromBusJeju(value as BusJejuStationRecord[])
-        : parseStopTranslationsJson(value as Record<string, unknown>[]))
+    ? parseStopTranslationsJson(value as Record<string, unknown>[])
     : parseStopTranslationsWorkbook(value);
 
   if (rows.length === 0) {

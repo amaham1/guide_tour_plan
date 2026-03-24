@@ -24,6 +24,7 @@ type KakaoKeywordResponse = {
 };
 
 const JEJU_RECT = "126.08,33.10,126.98,33.58";
+const KAKAO_SEARCH_TIMEOUT_MS = 10_000;
 
 function compactErrorDetail(value: string) {
   return value.replace(/\s+/g, " ").trim().slice(0, 240);
@@ -48,6 +49,14 @@ function buildCategoryLabel(document: KakaoKeywordDocument) {
   );
 }
 
+function resolveFetchFailureCause(error: unknown) {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return `request timed out after ${KAKAO_SEARCH_TIMEOUT_MS}ms`;
+  }
+
+  return error instanceof Error ? error.message : "unknown network error";
+}
+
 export async function searchKakaoPlaces(
   query: string,
   limit: number,
@@ -61,27 +70,37 @@ export async function searchKakaoPlaces(
   requestUrl.searchParams.set("size", String(Math.min(Math.max(limit, 1), 15)));
   requestUrl.searchParams.set("rect", JEJU_RECT);
 
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => {
+    controller.abort();
+  }, KAKAO_SEARCH_TIMEOUT_MS);
+
   let response: Response;
 
   try {
     response = await fetch(requestUrl, {
       cache: "no-store",
+      signal: controller.signal,
       headers: {
         Accept: "application/json",
         Authorization: `KakaoAK ${appEnv.kakaoRestApiKey}`,
       },
     });
   } catch (error) {
-    const cause = error instanceof Error ? error.message : "unknown network error";
+    const cause = resolveFetchFailureCause(error);
     throw new DependencyUnavailableError(
       `Kakao 장소 검색 API에 연결하지 못했습니다. 원인: ${cause}`,
     );
+  } finally {
+    clearTimeout(timeoutHandle);
   }
 
   if (!response.ok) {
     const bodyText = compactErrorDetail(await response.text());
     throw new UpstreamServiceError(
-      `Kakao 장소 검색이 실패했습니다 (${response.status} ${response.statusText}).${bodyText ? ` 원인: ${bodyText}` : ""}`,
+      `Kakao 장소 검색이 실패했습니다 (${response.status} ${response.statusText}).${
+        bodyText ? ` 원인: ${bodyText}` : ""
+      }`,
     );
   }
 

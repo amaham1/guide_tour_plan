@@ -50,7 +50,8 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
   const deferredQuery = useDeferredValue(query);
   const [results, setResults] = useState<SearchResultDto[]>([]);
   const [selectedPlaces, setSelectedPlaces] = useState<SelectedPlace[]>([]);
-  const [error, setError] = useState<string | null>(setupMessage);
+  const [formError, setFormError] = useState<string | null>(setupMessage);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [loadingResults, setLoadingResults] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [startAt, setStartAt] = useState(() => {
@@ -60,18 +61,20 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
   });
 
   useEffect(() => {
-    setError(setupMessage);
+    setFormError(setupMessage);
   }, [setupMessage]);
 
   useEffect(() => {
     if (!catalogReady || deferredQuery.trim().length < 1) {
       setResults([]);
+      setSearchError(null);
       setLoadingResults(false);
       return;
     }
 
     const controller = new AbortController();
     setLoadingResults(true);
+    setSearchError(null);
 
     void (async () => {
       try {
@@ -91,10 +94,11 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
         }
 
         setResults(payload.results ?? []);
+        setSearchError(null);
       } catch (fetchError) {
         if (!(fetchError instanceof DOMException && fetchError.name === "AbortError")) {
           setResults([]);
-          setError(
+          setSearchError(
             fetchError instanceof Error
               ? fetchError.message
               : "검색 중 문제가 발생했습니다.",
@@ -111,14 +115,15 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
   }, [catalogReady, deferredQuery]);
 
   function addPlace(place: SearchResultDto) {
-    setError(null);
+    setFormError(null);
+    setSearchError(null);
     setSelectedPlaces((current) => {
       if (current.some((item) => item.id === place.id)) {
         return current;
       }
 
       if (current.length >= 5) {
-        setError("장소는 최대 5개까지 선택할 수 있습니다.");
+        setFormError("장소는 최대 5개까지 선택할 수 있습니다.");
         return current;
       }
 
@@ -147,17 +152,18 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
 
   function handleSubmit() {
     if (!catalogReady) {
-      setError(setupMessage ?? "먼저 ingest를 완료해 주세요.");
+      setFormError(setupMessage ?? "먼저 ingest를 완료해 주세요.");
       return;
     }
 
     if (selectedPlaces.length < 2) {
-      setError("최소 2개의 장소를 선택해야 합니다.");
+      setFormError("최소 2개의 장소를 선택해야 합니다.");
       return;
     }
 
     setSubmitting(true);
-    setError(null);
+    setFormError(null);
+    setSearchError(null);
 
     startTransition(() => {
       void (async () => {
@@ -185,7 +191,7 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
 
           router.push(`/planner/results/${payload.planId}`);
         } catch (submitError) {
-          setError(
+          setFormError(
             submitError instanceof Error
               ? submitError.message
               : "플랜 생성 중 문제가 발생했습니다.",
@@ -196,6 +202,8 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
       })();
     });
   }
+
+  const visibleError = searchError ?? formError;
 
   return (
     <div className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
@@ -282,9 +290,9 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
           </div>
         </div>
 
-        {error ? (
+        {visibleError ? (
           <p className="mt-4 rounded-2xl border border-coral/25 bg-coral/10 px-4 py-3 text-sm text-coral">
-            오류: {error}
+            오류: {visibleError}
           </p>
         ) : null}
 

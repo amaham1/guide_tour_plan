@@ -332,8 +332,9 @@ async function loadPlannerGraph(
     }),
     prisma.routePattern.findMany({
       where: {
-        scheduleId: {
-          not: null,
+        isActive: true,
+        trips: {
+          some: {},
         },
       },
       include: {
@@ -561,8 +562,9 @@ export async function searchCatalog(rawInput: unknown) {
           routePatternStops: {
             some: {
               routePattern: {
-                scheduleId: {
-                  not: null,
+                isActive: true,
+                trips: {
+                  some: {},
                 },
               },
             },

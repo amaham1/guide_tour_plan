@@ -127,6 +127,7 @@ model Route {
   id          String         @id
   shortName   String
   displayName String
+  isActive    Boolean        @default(true)
   patterns    RoutePattern[]
   createdAt   DateTime       @default(now())
 }
@@ -134,7 +135,11 @@ model Route {
 model RoutePattern {
   id               String             @id
   routeId          String
-  scheduleId       String?            @unique
+  scheduleId       String?
+  externalRouteId  String?
+  directionCode    String?
+  waypointOrder    Int                @default(0)
+  isActive         Boolean            @default(true)
   busType          Int?
   directionLabel   String
   displayName      String
@@ -143,9 +148,12 @@ model RoutePattern {
   serviceNote      String?
   effectiveDate    DateTime?
   route            Route              @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  scheduleSources  RoutePatternScheduleSource[]
   stops            RoutePatternStop[]
   trips            Trip[]
   vehicleDeviceMap VehicleDeviceMap?
+
+  @@unique([externalRouteId, directionCode, waypointOrder])
 }
 
 model RoutePatternStop {
@@ -171,12 +179,32 @@ model Trip {
   id                String          @id
   routePatternId    String
   serviceCalendarId String
+  scheduleSourceId  String?
   headsign          String
   startTime         String
   rowLabel          String?
   routePattern      RoutePattern    @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+  scheduleSource    RoutePatternScheduleSource? @relation(fields: [scheduleSourceId], references: [id], onDelete: SetNull)
   serviceCalendar   ServiceCalendar @relation(fields: [serviceCalendarId], references: [id], onDelete: Cascade)
   stopTimes         StopTime[]
+
+  @@index([scheduleSourceId])
+}
+
+model RoutePatternScheduleSource {
+  id            String       @id @default(cuid())
+  routePatternId String
+  scheduleId    String
+  variantKey    String       @default("default")
+  sourceLabel   String?
+  effectiveDate DateTime?
+  isActive      Boolean      @default(true)
+  routePattern  RoutePattern @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+  trips         Trip[]
+
+  @@unique([scheduleId, variantKey, routePatternId])
+  @@index([scheduleId])
+  @@index([routePatternId])
 }
 
 model StopTime {

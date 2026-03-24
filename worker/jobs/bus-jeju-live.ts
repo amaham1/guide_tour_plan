@@ -18,6 +18,8 @@ export type BusJejuLineCandidate = {
   routeNm: string;
   routeNum: string;
   routeSubNm?: string | null;
+  frontRouteNum?: string | null;
+  rearRouteNum?: string | null;
   busTypeStr?: string | null;
   orgtNm?: string | null;
   dstNm?: string | null;
