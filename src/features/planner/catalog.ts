@@ -10,6 +10,10 @@ export type PlannerCatalogStatus = {
   routePatternCount: number;
   tripCount: number;
   walkLinkCount: number;
+  routeGeometryCount: number;
+  stopProjectionCount: number;
+  segmentProfileCount: number;
+  lastBusCustomizeAt: string | null;
   message: string;
 };
 
@@ -18,6 +22,7 @@ const BUS_JOB_KEYS = [
   "routes-openapi",
   "route-patterns-openapi",
   "routes-html",
+  "route-geometries",
   "timetables-xlsx",
   "walk-links",
 ] as const;
@@ -46,6 +51,10 @@ export async function getPlannerCatalogStatus(prisma: PrismaClient = db) {
         routePatternCount,
         tripCount,
         walkLinkCount,
+        routeGeometryCount,
+        stopProjectionCount,
+        segmentProfileCount,
+        lastBusCustomizeAt,
         jobs,
       ] = await Promise.all([
         prisma.place.count({
@@ -76,10 +85,21 @@ export async function getPlannerCatalogStatus(prisma: PrismaClient = db) {
             kind: "STOP_STOP",
           },
         }),
+        prisma.routePatternGeometry.count(),
+        prisma.routePatternStopProjection.count(),
+        prisma.segmentTravelProfile.count(),
+        prisma.ingestJob.findUnique({
+          where: {
+            key: "osrm-bus-customize",
+          },
+          select: {
+            lastSuccessfulAt: true,
+          },
+        }),
         prisma.ingestJob.findMany({
           where: {
             key: {
-              in: [...BUS_JOB_KEYS, "visit-jeju-places"],
+              in: [...BUS_JOB_KEYS, "visit-jeju-places", "osrm-bus-customize"],
             },
           },
         }),
@@ -114,6 +134,10 @@ export async function getPlannerCatalogStatus(prisma: PrismaClient = db) {
         routePatternCount,
         tripCount,
         walkLinkCount,
+        routeGeometryCount,
+        stopProjectionCount,
+        segmentProfileCount,
+        lastBusCustomizeAt: lastBusCustomizeAt?.lastSuccessfulAt?.toISOString() ?? null,
         message,
       } satisfies PlannerCatalogStatus;
 

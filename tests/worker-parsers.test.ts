@@ -141,6 +141,46 @@ describe("bus jeju parser", () => {
       },
     ]);
   });
+
+  it("ignores blank separator columns that happen to contain times", () => {
+    const parsed = parseScheduleTableRows([
+      { ROW_SEQ: 0, COLUMN_SEQ: 1, COLUMN_NM: "노선번호" },
+      { ROW_SEQ: 0, COLUMN_SEQ: 2, COLUMN_NM: "한림공원[동]" },
+      { ROW_SEQ: 0, COLUMN_SEQ: 3, COLUMN_NM: "연동입구[동]" },
+      { ROW_SEQ: 0, COLUMN_SEQ: 4, COLUMN_NM: "" },
+      { ROW_SEQ: 0, COLUMN_SEQ: 5, COLUMN_NM: "제주대학교병원[서]" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 1, COLUMN_NM: "202번" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 2, COLUMN_NM: "16:54" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 3, COLUMN_NM: "18:13" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 4, COLUMN_NM: "" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 5, COLUMN_NM: "18:39" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 1, COLUMN_NM: "202번" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 2, COLUMN_NM: "17:05" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 3, COLUMN_NM: "18:24" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 4, COLUMN_NM: "18:31" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 5, COLUMN_NM: "18:50" },
+    ]);
+
+    expect(parsed.stopNames).toEqual(["한림공원[동]", "연동입구[동]", "제주대학교병원[서]"]);
+    expect(parsed.variants).toEqual([
+      {
+        variantKey: "202",
+        rawVariantLabel: "202번",
+        trips: [
+          expect.objectContaining({
+            rowLabel: "202번",
+            rawValues: ["16:54", "18:13", "18:39"],
+            times: ["16:54", "18:13", "18:39"],
+          }),
+          expect.objectContaining({
+            rowLabel: "202번",
+            rawValues: ["17:05", "18:24", "18:50"],
+            times: ["17:05", "18:24", "18:50"],
+          }),
+        ],
+      },
+    ]);
+  });
 });
 
 describe("stop translation parser", () => {

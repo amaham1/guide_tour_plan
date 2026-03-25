@@ -11,6 +11,7 @@ import {
   buildRouteMatchKeys,
   extractRouteShortNameTokens,
 } from "@/worker/jobs/route-labels";
+import { scoreStopNameMatch } from "@/worker/jobs/helpers";
 import type { JobOutcome } from "@/worker/jobs/types";
 
 type PatternStopSeed = {
@@ -30,6 +31,18 @@ type PatternSeed = {
   busType: number | null;
   isActive: boolean;
   stops: PatternStopSeed[];
+};
+
+type KnownStop = {
+  id: string;
+  displayName: string;
+  translations: string[];
+};
+
+type SeedStop = {
+  stopId: string;
+  sequence: number;
+  displayName: string;
 };
 
 function buildPatternId(externalRouteId: string, directionCode: string, waypointOrder: number) {
@@ -69,6 +82,91 @@ function buildCandidateKeys(candidate: BusJejuLineCandidate) {
   return keys;
 }
 
+function getKnownStopScore(stopName: string, stop: KnownStop) {
+  return Math.max(
+    scoreStopNameMatch(stopName, stop.displayName),
+    ...stop.translations.map((translation) => scoreStopNameMatch(stopName, translation)),
+  );
+}
+
+function selectRepresentativeStop(
+  stops: SeedStop[],
+  terminalName: string | null | undefined,
+) {
+  if (!terminalName || stops.length === 1) {
+    return stops[0];
+  }
+
+  return [...stops]
+    .map((stop, index) => ({
+      stop,
+      index,
+      score: scoreStopNameMatch(terminalName, stop.displayName),
+    }))
+    .sort((left, right) => {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+
+      return right.index - left.index;
+    })[0]?.stop ?? stops[0];
+}
+
+function findBestKnownStop(
+  knownStops: KnownStop[],
+  stopName: string | null | undefined,
+) {
+  if (!stopName) {
+    return null;
+  }
+
+  const ranked = knownStops
+    .map((stop) => ({
+      stop,
+      score: getKnownStopScore(stopName, stop),
+    }))
+    .filter((candidate) => candidate.score === 100)
+    .sort((left, right) => {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+
+      return left.stop.displayName.length - right.stop.displayName.length;
+    });
+
+  return ranked[0]?.stop ?? null;
+}
+
+function ensureTerminalStop(
+  stops: SeedStop[],
+  terminalName: string | null | undefined,
+  knownStops: KnownStop[],
+  position: "start" | "end",
+) {
+  if (!terminalName || stops.length === 0) {
+    return stops;
+  }
+
+  const edgeStop = position === "start" ? stops[0] : stops[stops.length - 1];
+  if (scoreStopNameMatch(terminalName, edgeStop.displayName) === 100) {
+    return stops;
+  }
+
+  const terminalStop = findBestKnownStop(knownStops, terminalName);
+  if (!terminalStop || stops.some((stop) => stop.stopId === terminalStop.id)) {
+    return stops;
+  }
+
+  const sequence = position === "start" ? stops[0].sequence - 1 : stops[stops.length - 1].sequence + 1;
+  const nextStop = {
+    stopId: terminalStop.id,
+    sequence,
+    displayName: terminalStop.displayName,
+  } satisfies SeedStop;
+
+  return position === "start" ? [nextStop, ...stops] : [...stops, nextStop];
+}
+
 function matchesRouteShortName(candidate: BusJejuLineCandidate, routeShortName: string) {
   const targets = new Set(buildRouteMatchKeys(routeShortName));
   const keys = buildCandidateKeys(candidate);
@@ -79,6 +177,7 @@ function buildPatternSeed(
   routeId: string,
   routeShortName: string,
   lineInfo: BusJejuLineInfo,
+  knownStops: KnownStop[],
   validStopIds: Set<string>,
 ) {
   const externalRouteId = normalizeText(lineInfo.routeId);
@@ -88,24 +187,49 @@ function buildPatternSeed(
     .map((stop) => ({
       stopId: normalizeText(stop.stationId),
       sequence: toNumber(stop.linkOrd),
+      displayName: normalizeText(stop.stationNm),
     }))
     .filter(
-      (stop): stop is { stopId: string; sequence: number } =>
+      (stop): stop is { stopId: string; sequence: number; displayName: string } =>
         Boolean(stop.stopId) && stop.sequence !== null && validStopIds.has(stop.stopId),
     )
     .sort((left, right) => left.sequence - right.sequence);
-  const dedupedStops = new Map<number, { stopId: string; sequence: number }>();
+  const groupedStops = new Map<number, SeedStop[]>();
 
   for (const stop of orderedStops) {
-    if (!dedupedStops.has(stop.sequence)) {
-      dedupedStops.set(stop.sequence, stop);
-    }
+    const next = groupedStops.get(stop.sequence) ?? [];
+    next.push(stop);
+    groupedStops.set(stop.sequence, next);
   }
-  const normalizedStops = [...dedupedStops.values()];
+
+  const sequences = [...groupedStops.keys()].sort((left, right) => left - right);
+  let normalizedStops = sequences.map((sequence) =>
+    selectRepresentativeStop(
+      groupedStops.get(sequence) ?? [],
+      sequence === sequences[0]
+        ? normalizeText(lineInfo.orgtNm)
+        : sequence === sequences[sequences.length - 1]
+          ? normalizeText(lineInfo.dstNm ?? lineInfo.routeSubNm)
+          : null,
+    ),
+  );
 
   if (!externalRouteId || normalizedStops.length <= 1) {
     return null;
   }
+
+  normalizedStops = ensureTerminalStop(
+    normalizedStops,
+    normalizeText(lineInfo.orgtNm),
+    knownStops,
+    "start",
+  );
+  normalizedStops = ensureTerminalStop(
+    normalizedStops,
+    normalizeText(lineInfo.dstNm ?? lineInfo.routeSubNm),
+    knownStops,
+    "end",
+  );
 
   return {
     id: buildPatternId(externalRouteId, directionCode, waypointOrder),
@@ -168,10 +292,21 @@ export async function runRoutePatternsOpenApiJob(
     runtime.prisma.stop.findMany({
       select: {
         id: true,
+        displayName: true,
+        translations: {
+          select: {
+            displayName: true,
+          },
+        },
       },
     }),
   ]);
 
+  const knownStops = stops.map((stop) => ({
+    id: stop.id,
+    displayName: stop.displayName,
+    translations: stop.translations.map((translation) => translation.displayName),
+  }));
   const validStopIds = new Set(stops.map((stop) => stop.id));
   const rawPatternSeeds: PatternSeed[] = [];
   let failureCount = 0;
@@ -205,7 +340,13 @@ export async function runRoutePatternsOpenApiJob(
     for (const candidate of candidates.values()) {
       try {
         const lineInfo = await fetchBusJejuLineInfo(runtime, candidate.routeId);
-        const pattern = buildPatternSeed(route.id, route.shortName, lineInfo, validStopIds);
+        const pattern = buildPatternSeed(
+          route.id,
+          route.shortName,
+          lineInfo,
+          knownStops,
+          validStopIds,
+        );
         if (!pattern) {
           failureCount += 1;
           continue;

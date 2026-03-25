@@ -3,6 +3,22 @@ import { syncSourceCatalog } from "@/lib/source-catalog";
 import { createWorkerRuntime } from "@/worker/core/runtime";
 import { jobRegistry } from "@/worker/jobs/registry";
 
+const defaultRunAllOrder = [
+  "stops",
+  "stop-translations",
+  "routes-openapi",
+  "route-patterns-openapi",
+  "routes-html",
+  "route-geometries",
+  "timetables-xlsx",
+  "walk-links",
+  "vehicle-device-map",
+  "segment-profiles",
+  "osrm-bus-customize",
+  "transit-audit",
+  "visit-jeju-places",
+] as const;
+
 type RunOptions = {
   prisma?: PrismaClient;
   triggeredBy?: string;
@@ -102,7 +118,10 @@ export async function runJobByKey(jobKey: string, options: RunOptions = {}) {
 export async function runAllJobs(options: RunOptions = {}) {
   const results: Record<string, Awaited<ReturnType<typeof runSingleJob>>> = {};
 
-  for (const jobKey of Object.keys(jobRegistry)) {
+  for (const jobKey of defaultRunAllOrder) {
+    if (!jobRegistry[jobKey]) {
+      continue;
+    }
     results[jobKey] = await runSingleJob(jobKey, options);
   }
 

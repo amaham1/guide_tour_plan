@@ -26,7 +26,19 @@ function matchesRouteShortName(candidate: BusJejuLineCandidate, routeShortName: 
 }
 
 export async function runTransitAuditJob(runtime: WorkerRuntime): Promise<JobOutcome> {
-  const [routes, activePatternStops, activePatterns, activeScheduleSources, tripCount, stopCount] =
+  const [
+    routes,
+    activePatternStops,
+    activePatterns,
+    activeScheduleSources,
+    tripCount,
+    stopCount,
+    routeGeometries,
+    stopProjections,
+    segmentProfileCount,
+    segmentProfiles,
+    latestCustomizeJob,
+  ] =
     await Promise.all([
       runtime.prisma.route.findMany({
         where: {
@@ -59,6 +71,36 @@ export async function runTransitAuditJob(runtime: WorkerRuntime): Promise<JobOut
       }),
       runtime.prisma.trip.count(),
       runtime.prisma.stop.count(),
+      runtime.prisma.routePatternGeometry.findMany({
+        select: {
+          routePatternId: true,
+          confidence: true,
+          sourceKind: true,
+        },
+      }),
+      runtime.prisma.routePatternStopProjection.findMany({
+        select: {
+          routePatternId: true,
+          sequence: true,
+          offsetMeters: true,
+          snapDistanceMeters: true,
+        },
+      }),
+      runtime.prisma.segmentTravelProfile.count(),
+      runtime.prisma.segmentTravelProfile.findMany({
+        distinct: ["routePatternId"],
+        select: {
+          routePatternId: true,
+        },
+      }),
+      runtime.prisma.ingestJob.findUnique({
+        where: {
+          key: "osrm-bus-customize",
+        },
+        select: {
+          lastSuccessfulAt: true,
+        },
+      }),
     ]);
 
   const liveRoutesByStation = new Map<string, Set<string>>();
@@ -148,16 +190,84 @@ export async function runTransitAuditJob(runtime: WorkerRuntime): Promise<JobOut
       })),
   }));
 
+  const geometryPatternIds = new Set(routeGeometries.map((geometry) => geometry.routePatternId));
+  const geometrySourceBreakdown = routeGeometries.reduce<Record<string, number>>((acc, geometry) => {
+    acc[geometry.sourceKind] = (acc[geometry.sourceKind] ?? 0) + 1;
+    return acc;
+  }, {});
+  const segmentProfilePatternIds = new Set(segmentProfiles.map((profile) => profile.routePatternId));
+  const patternStopMap = new Map<string, typeof activePatternStops>();
+  for (const stop of activePatternStops) {
+    const next = patternStopMap.get(stop.routePatternId) ?? [];
+    next.push(stop);
+    patternStopMap.set(stop.routePatternId, next);
+  }
+
+  const projectionMap = new Map<string, typeof stopProjections>();
+  for (const projection of stopProjections) {
+    const next = projectionMap.get(projection.routePatternId) ?? [];
+    next.push(projection);
+    projectionMap.set(projection.routePatternId, next);
+  }
+
+  const placeholderDistancePatternCount = [...patternStopMap.values()].filter((stops) => {
+    const sorted = [...stops].sort((left, right) => left.sequence - right.sequence);
+    return (
+      sorted.length > 1 &&
+      sorted.every((stop, index) => stop.distanceFromStart === index * 1000)
+    );
+  }).length;
+
+  const projectionMonotonicFailureCount = [...projectionMap.values()].filter((items) => {
+    const sorted = [...items].sort((left, right) => left.sequence - right.sequence);
+    return sorted.some((item, index) => index > 0 && item.offsetMeters < sorted[index - 1]!.offsetMeters);
+  }).length;
+
+  const projectionCoverageCount = [...projectionMap.values()].filter((items) => items.length > 0).length;
+  const meanSnapDistance =
+    stopProjections.length === 0
+      ? null
+      : Math.round(
+          stopProjections.reduce((sum, projection) => sum + projection.snapDistanceMeters, 0) /
+            stopProjections.length,
+        );
+  const lowConfidenceGeometryCount = routeGeometries.filter((geometry) => geometry.confidence < 0.7).length;
+  const staleCustomize =
+    !latestCustomizeJob?.lastSuccessfulAt ||
+    Date.now() - latestCustomizeJob.lastSuccessfulAt.getTime() > 30 * 60 * 1000;
+
   return {
     processedCount: routes.length,
     successCount: activePatterns,
-    failureCount: coverageGaps.length,
+    failureCount:
+      coverageGaps.length +
+      lowConfidenceGeometryCount +
+      placeholderDistancePatternCount +
+      projectionMonotonicFailureCount +
+      Number(staleCustomize),
     meta: {
       stopCount,
       livePatternCount,
       activePatternCount: activePatterns,
       activeScheduleSourceCount: activeScheduleSources,
       tripCount,
+      geometryCoverage:
+        activePatterns === 0 ? 0 : Math.round((geometryPatternIds.size / activePatterns) * 100),
+      geometrySourceBreakdown,
+      gtfsConfigured: Boolean(runtime.env.gtfsFeedUrl || runtime.env.gtfsShapesPath),
+      stopProjectionCoverage:
+        activePatterns === 0 ? 0 : Math.round((projectionCoverageCount / activePatterns) * 100),
+      meanSnapDistance,
+      segmentProfileCount,
+      segmentProfileCoverage:
+        activePatterns === 0
+          ? 0
+          : Math.round((segmentProfilePatternIds.size / activePatterns) * 100),
+      lastCustomizeAt: latestCustomizeJob?.lastSuccessfulAt?.toISOString() ?? null,
+      staleCustomize,
+      lowConfidenceGeometryCount,
+      placeholderDistancePatternCount,
+      projectionMonotonicFailureCount,
       coverageGaps,
       debugStations,
       source: {

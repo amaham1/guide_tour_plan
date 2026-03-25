@@ -17,9 +17,8 @@ import { fetchScheduleTable } from "@/worker/jobs/schedule-table";
 import type { JobOutcome } from "@/worker/jobs/types";
 
 const busTypes = [1, 2, 3, 4] as const;
-const specialScheduleKeywords = [
+const broadSpecialScheduleKeywords = [
   "\uC784\uC2DC",
-  "\uB9C8\uC744",
   "\uC6B0\uB3C4",
   "\uC635\uC11C\uBC84\uC2A4",
   "\uAD00\uAD11\uC9C0\uC21C\uD658",
@@ -89,20 +88,32 @@ function buildPatternIndex(
 }
 
 function isSpecialSchedule(item: { label: string; shortName: string }, detail: RouteDetail) {
-  const haystacks = [
-    item.label,
-    item.shortName,
-    detail.shortName,
-    detail.viaText,
-    detail.waypointText,
-    detail.serviceNote,
-  ]
+  const haystacks = [item.label, item.shortName, detail.shortName]
     .map((value) => normalizeText(value))
     .filter(Boolean);
 
-  return specialScheduleKeywords.some((keyword) =>
-    haystacks.some((value) => value.includes(keyword)),
-  );
+  return haystacks.some((value) => {
+    const compact = value.replace(/\s+/g, "");
+    return (
+      broadSpecialScheduleKeywords.some((keyword) => compact.includes(keyword)) ||
+      /(?:^|[|(])\uB9C8\uC744(?:\uBC84\uC2A4)?(?:\)|$)/.test(compact)
+    );
+  });
+}
+
+async function deactivateScheduleSources(runtime: WorkerRuntime, scheduleId: string) {
+  await runtime.prisma.routePatternScheduleSource.updateMany({
+    where: {
+      scheduleId,
+    },
+    data: {
+      isActive: false,
+    },
+  });
+}
+
+function isUnstableVariantTable(table: { variants: Array<{ variantKey: string }> }) {
+  return table.variants.length > 1 && table.variants.some((variant) => variant.variantKey === "default");
 }
 
 function getDetailVariant(detail: RouteDetail, variantKey: string) {
@@ -219,6 +230,7 @@ export async function runRoutesHtmlJob(runtime: WorkerRuntime): Promise<JobOutco
       const detail = parseRouteDetailHtml(detailHtml, item.scheduleId);
 
       if (isSpecialSchedule(item, detail)) {
+        await deactivateScheduleSources(runtime, item.scheduleId);
         skippedSpecialSchedules.push({
           scheduleId: item.scheduleId,
           shortName: detail.shortName || item.shortName,
@@ -230,7 +242,8 @@ export async function runRoutesHtmlJob(runtime: WorkerRuntime): Promise<JobOutco
       const { rows } = await fetchScheduleTable(runtime, item.scheduleId);
       const table = parseScheduleTableRows(rows);
 
-      if (table.variants.length > 1 && table.variants.some((variant) => variant.variantKey === "default")) {
+      if (isUnstableVariantTable(table)) {
+        await deactivateScheduleSources(runtime, item.scheduleId);
         skippedSpecialSchedules.push({
           scheduleId: item.scheduleId,
           shortName: detail.shortName || item.shortName,
@@ -286,14 +299,7 @@ export async function runRoutesHtmlJob(runtime: WorkerRuntime): Promise<JobOutco
         });
       }
 
-      await runtime.prisma.routePatternScheduleSource.updateMany({
-        where: {
-          scheduleId: item.scheduleId,
-        },
-        data: {
-          isActive: false,
-        },
-      });
+      await deactivateScheduleSources(runtime, item.scheduleId);
 
       for (const scheduleMatch of scheduleMatches) {
         const detailVariant = getDetailVariant(detail, scheduleMatch.variant.variantKey);

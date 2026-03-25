@@ -9,16 +9,17 @@ function normalizeRouteToken(value: string) {
 
 export function extractRouteShortNameTokens(value: string) {
   const normalized = normalizeText(value);
+  const tokenSource = normalized.replace(/\b\d{1,2}[:.]\d{2}(?:\s*\([^)]*\))?/g, " ");
   const tokens = new Set<string>();
 
-  for (const match of normalized.matchAll(shorthandBranchPattern)) {
+  for (const match of tokenSource.matchAll(shorthandBranchPattern)) {
     const [, base, branchList] = match;
     for (const branch of branchList.split(/[,\s/]+/).filter(Boolean)) {
       tokens.add(`${base}-${branch}`);
     }
   }
 
-  for (const match of normalized.matchAll(explicitTokenPattern)) {
+  for (const match of tokenSource.matchAll(explicitTokenPattern)) {
     const token = normalizeRouteToken(match[0]);
     if (/^\d{2,4}(?:-\d+)?$/.test(token)) {
       tokens.add(token);

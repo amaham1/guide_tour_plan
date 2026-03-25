@@ -5,6 +5,10 @@ import { getAdminDashboard } from "@/features/admin/service";
 import { appEnv } from "@/lib/env";
 import { formatDateTime } from "@/lib/utils";
 
+function formatUnknownDate(value: string | Date | null) {
+  return value ? formatDateTime(value) : "none";
+}
+
 export default async function AdminPage() {
   if (!appEnv.enableInternalAdmin) {
     notFound();
@@ -22,47 +26,36 @@ export default async function AdminPage() {
                 Internal Admin
               </p>
               <h1 className="mt-3 text-4xl font-semibold text-ink sm:text-5xl">
-                실데이터 ingest와 검증 상태
+                Transit Ingest Health
               </h1>
               <p className="mt-4 max-w-3xl text-base leading-7 text-ink/70">
-                source catalog, ingest 이력, POI 조인 예외, 노선 패턴 검토, 시간표 파싱,
-                vehicle-device-map 상태를 한 화면에서 확인합니다.
+                Review ingest freshness, geometry coverage, timetable quality, and OSRM status in
+                one place.
               </p>
             </div>
             <RunAllButton />
           </div>
 
-          <div className="mt-6 grid gap-4 sm:grid-cols-5">
-            <div className="rounded-2xl border border-ink/8 bg-white p-4">
-              <p className="text-sm text-ink/55">POI</p>
-              <p className="mt-1 text-2xl font-semibold text-ink">
-                {dashboard.catalogStatus.placeCount}
-              </p>
-            </div>
-            <div className="rounded-2xl border border-ink/8 bg-white p-4">
-              <p className="text-sm text-ink/55">정류소</p>
-              <p className="mt-1 text-2xl font-semibold text-ink">
-                {dashboard.catalogStatus.stopCount}
-              </p>
-            </div>
-            <div className="rounded-2xl border border-ink/8 bg-white p-4">
-              <p className="text-sm text-ink/55">노선 패턴</p>
-              <p className="mt-1 text-2xl font-semibold text-ink">
-                {dashboard.catalogStatus.routePatternCount}
-              </p>
-            </div>
-            <div className="rounded-2xl border border-ink/8 bg-white p-4">
-              <p className="text-sm text-ink/55">Trip</p>
-              <p className="mt-1 text-2xl font-semibold text-ink">
-                {dashboard.catalogStatus.tripCount}
-              </p>
-            </div>
-            <div className="rounded-2xl border border-ink/8 bg-white p-4">
-              <p className="text-sm text-ink/55">보행 링크</p>
-              <p className="mt-1 text-2xl font-semibold text-ink">
-                {dashboard.catalogStatus.walkLinkCount}
-              </p>
-            </div>
+          <div className="mt-6 grid gap-4 sm:grid-cols-4 xl:grid-cols-8">
+            {[
+              ["POI", dashboard.catalogStatus.placeCount],
+              ["Stop", dashboard.catalogStatus.stopCount],
+              ["Route Pattern", dashboard.catalogStatus.routePatternCount],
+              ["Trip", dashboard.catalogStatus.tripCount],
+              ["Walk Link", dashboard.catalogStatus.walkLinkCount],
+              ["Geometry", dashboard.catalogStatus.routeGeometryCount],
+              ["Projection", dashboard.catalogStatus.stopProjectionCount],
+              ["Segment Profile", dashboard.catalogStatus.segmentProfileCount],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-2xl border border-ink/8 bg-white p-4">
+                <p className="text-sm text-ink/55">{label}</p>
+                <p className="mt-1 text-2xl font-semibold text-ink">{String(value)}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-4 rounded-2xl border border-ink/8 bg-white p-4 text-sm text-ink/65">
+            latest bus customize: {formatUnknownDate(dashboard.catalogStatus.lastBusCustomizeAt)}
           </div>
         </section>
 
@@ -101,22 +94,20 @@ export default async function AdminPage() {
                     <div>
                       <p className="font-semibold text-ink">{job.name}</p>
                       <p className="text-sm text-ink/55">
-                        {job.key} · {job.scheduleLabel}
+                        {job.key} | {job.scheduleLabel}
                       </p>
                     </div>
                     <RunJobButton jobKey={job.key} />
                   </div>
                   <p className="mt-2 text-sm text-ink/55">
-                    최근 성공:
-                    {" "}
-                    {job.lastSuccessfulAt ? formatDateTime(job.lastSuccessfulAt) : "아직 없음"}
+                    latest success: {formatUnknownDate(job.lastSuccessfulAt)}
                   </p>
                 </div>
               ))}
             </div>
 
             <div className="mt-6 rounded-2xl border border-ink/8 bg-white p-4">
-              <h3 className="text-lg font-semibold text-ink">최근 실행 이력</h3>
+              <h3 className="text-lg font-semibold text-ink">Recent Runs</h3>
               <div className="mt-4 space-y-3">
                 {dashboard.runs.map((run) => (
                   <div key={run.id} className="rounded-xl border border-ink/8 px-3 py-3">
@@ -126,7 +117,7 @@ export default async function AdminPage() {
                     </div>
                     <p className="mt-1 text-sm text-ink/55">
                       {formatDateTime(run.startedAt)}
-                      {run.endedAt ? ` → ${formatDateTime(run.endedAt)}` : ""}
+                      {run.endedAt ? ` -> ${formatDateTime(run.endedAt)}` : ""}
                     </p>
                     {run.errorSummary ? (
                       <p className="mt-1 text-sm text-coral">{run.errorSummary}</p>
@@ -140,18 +131,18 @@ export default async function AdminPage() {
 
         <section className="grid gap-6 xl:grid-cols-3">
           <article className="rounded-[2rem] border border-ink/10 bg-[rgba(255,252,246,0.92)] p-6 shadow-tide">
-            <h2 className="text-2xl font-semibold text-ink">POI 조인 예외</h2>
+            <h2 className="text-2xl font-semibold text-ink">POI Join Exceptions</h2>
             <div className="mt-5 space-y-3">
               {dashboard.poiJoinExceptions.length === 0 ? (
                 <p className="rounded-2xl border border-ink/8 bg-white px-4 py-4 text-sm text-ink/60">
-                  예외가 없습니다.
+                  No exceptions found.
                 </p>
               ) : (
                 dashboard.poiJoinExceptions.map((place) => (
                   <div key={place.id} className="rounded-2xl border border-ink/8 bg-white px-4 py-4">
                     <p className="font-semibold text-ink">{place.displayName}</p>
                     <p className="mt-1 text-sm text-ink/55">
-                      access {place.accessLinks} · egress {place.egressLinks}
+                      access {place.accessLinks} | egress {place.egressLinks}
                     </p>
                   </div>
                 ))
@@ -166,10 +157,18 @@ export default async function AdminPage() {
                 <div key={pattern.id} className="rounded-2xl border border-ink/8 bg-white px-4 py-4">
                   <p className="font-semibold text-ink">{pattern.label}</p>
                   <p className="mt-1 text-sm text-ink/55">
-                    정류소 {pattern.stopCount} · trip {pattern.tripCount}
+                    stops {pattern.stopCount} | trips {pattern.tripCount}
                   </p>
                   <p className="mt-1 text-sm text-ink/55">
-                    sequence {pattern.sequenceOk ? "OK" : "CHECK"} · distance {pattern.distanceMonotonic ? "OK" : "CHECK"} · placeholder {pattern.placeholderStopCount}
+                    sequence {pattern.sequenceOk ? "OK" : "CHECK"} | distance{" "}
+                    {pattern.distanceMonotonic ? "OK" : "CHECK"} | unresolved stop{" "}
+                    {pattern.placeholderStopCount}
+                  </p>
+                  <p className="mt-1 text-sm text-ink/55">
+                    geometry {pattern.geometrySource ?? "NONE"} | confidence{" "}
+                    {pattern.geometryConfidence?.toFixed(2) ?? "-"} | projection{" "}
+                    {pattern.projectedStopCount}/{pattern.stopCount} | mean snap{" "}
+                    {pattern.meanSnapDistance ?? "-"}m
                   </p>
                 </div>
               ))}
@@ -177,9 +176,9 @@ export default async function AdminPage() {
           </article>
 
           <article className="rounded-[2rem] border border-ink/10 bg-[rgba(255,252,246,0.92)] p-6 shadow-tide">
-            <h2 className="text-2xl font-semibold text-ink">Timetable / Vehicle Map</h2>
+            <h2 className="text-2xl font-semibold text-ink">Timetable / Vehicle / Geometry</h2>
             <div className="rounded-2xl border border-ink/8 bg-white p-4">
-              <p className="text-sm text-ink/55">매핑 성공률</p>
+              <p className="text-sm text-ink/55">Vehicle map coverage</p>
               <p className="mt-1 text-2xl font-semibold text-ink">
                 {dashboard.vehicleMapStats.successRate}%
               </p>
@@ -187,15 +186,56 @@ export default async function AdminPage() {
                 {dashboard.vehicleMapStats.mappedPatterns} / {dashboard.vehicleMapStats.totalPatterns}
               </p>
             </div>
+
+            <div className="mt-4 rounded-2xl border border-ink/8 bg-white p-4 text-sm text-ink/55">
+              geometry coverage {dashboard.geometryStats.geometryCoverage}% | projection coverage{" "}
+              {dashboard.geometryStats.projectionCoverage}% | segment profiles{" "}
+              {dashboard.geometryStats.segmentProfileCount}
+              <br />
+              latest customize {formatUnknownDate(dashboard.geometryStats.latestCustomizeAt)}
+              <br />
+              route-geometries {formatUnknownDate(dashboard.geometryStats.latestRouteGeometryAt)}
+              <br />
+              GTFS configured {dashboard.geometryStats.gtfsConfigured ? "YES" : "NO"} | GTFS match{" "}
+              {dashboard.geometryStats.gtfsMatchCount} | OSRM fallback{" "}
+              {dashboard.geometryStats.fallbackCount}
+              {dashboard.geometryStats.gtfsSource ? (
+                <>
+                  <br />
+                  GTFS source {dashboard.geometryStats.gtfsSource}
+                </>
+              ) : null}
+              {dashboard.geometryStats.gtfsLoadError ? (
+                <>
+                  <br />
+                  GTFS load error {dashboard.geometryStats.gtfsLoadError}
+                </>
+              ) : null}
+              {dashboard.geometryStats.gtfsProbe ? (
+                <>
+                  <br />
+                  GTFS files{" "}
+                  {Array.isArray(dashboard.geometryStats.gtfsProbe.availableFiles)
+                    ? dashboard.geometryStats.gtfsProbe.availableFiles.join(", ")
+                    : "-"}{" "}
+                  | missing{" "}
+                  {Array.isArray(dashboard.geometryStats.gtfsProbe.missingFiles) &&
+                  dashboard.geometryStats.gtfsProbe.missingFiles.length > 0
+                    ? dashboard.geometryStats.gtfsProbe.missingFiles.join(", ")
+                    : "none"}
+                </>
+              ) : null}
+            </div>
+
             <div className="mt-5 space-y-3">
               {dashboard.timetableReview.map((pattern) => (
                 <div key={pattern.id} className="rounded-2xl border border-ink/8 bg-white px-4 py-4">
                   <p className="font-semibold text-ink">{pattern.label}</p>
                   <p className="mt-1 text-sm text-ink/55">
-                    trip {pattern.tripCount} · estimated stop time {pattern.estimatedStopTimeCount}
+                    trips {pattern.tripCount} | estimated stop times {pattern.estimatedStopTimeCount}
                   </p>
                   <p className="mt-1 text-sm text-ink/55">
-                    {pattern.hasTrips ? "시간표 적재됨" : "trip 없음"}
+                    {pattern.hasTrips ? "trip data present" : "no trips"}
                   </p>
                 </div>
               ))}

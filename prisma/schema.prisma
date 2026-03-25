@@ -39,6 +39,25 @@ enum SessionStatus {
   FAILED
 }
 
+enum GeometrySourceKind {
+  GTFS
+  OSM_RELATION
+  GNSS_MATCHED
+  OSRM_DERIVED
+}
+
+enum StopTimeSourceKind {
+  OFFICIAL
+  DISTANCE_INTERPOLATED
+  SEGMENT_PROFILE
+}
+
+enum ServiceDayClass {
+  WEEKDAY
+  SATURDAY
+  SUNDAY_HOLIDAY
+}
+
 model Place {
   id              String           @id
   slug            String           @unique
@@ -105,6 +124,7 @@ model Stop {
   latitude          Float
   longitude         Float
   translations      StopTranslation[]
+  projections       RoutePatternStopProjection[]
   routePatternStops RoutePatternStop[]
   stopTimes         StopTime[]
   walkFromLinks     WalkLink[]         @relation("StopOrigin")
@@ -149,7 +169,10 @@ model RoutePattern {
   effectiveDate    DateTime?
   route            Route              @relation(fields: [routeId], references: [id], onDelete: Cascade)
   scheduleSources  RoutePatternScheduleSource[]
+  geometry         RoutePatternGeometry?
+  stopProjections  RoutePatternStopProjection[]
   stops            RoutePatternStop[]
+  segmentProfiles  SegmentTravelProfile[]
   trips            Trip[]
   vehicleDeviceMap VehicleDeviceMap?
 
@@ -166,6 +189,37 @@ model RoutePatternStop {
   stop              Stop         @relation(fields: [stopId], references: [id], onDelete: Cascade)
 
   @@unique([routePatternId, sequence])
+}
+
+model RoutePatternGeometry {
+  id            String             @id @default(cuid())
+  routePatternId String            @unique
+  sourceKind    GeometrySourceKind
+  shapeRef      String?
+  geometry      Json
+  lengthMeters  Int
+  confidence    Float              @default(0)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  routePattern  RoutePattern       @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+}
+
+model RoutePatternStopProjection {
+  id                String             @id @default(cuid())
+  routePatternId    String
+  stopId            String
+  sequence          Int
+  offsetMeters      Int
+  snapDistanceMeters Int
+  sourceKind        GeometrySourceKind
+  confidence        Float              @default(0)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  routePattern      RoutePattern       @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+  stop              Stop               @relation(fields: [stopId], references: [id], onDelete: Cascade)
+
+  @@unique([routePatternId, sequence])
+  @@index([routePatternId, offsetMeters])
 }
 
 model ServiceCalendar {
@@ -215,6 +269,8 @@ model StopTime {
   arrivalMinutes   Int
   departureMinutes Int
   isEstimated      Boolean @default(false)
+  timeSource       StopTimeSourceKind @default(OFFICIAL)
+  confidence       Float   @default(1)
   trip             Trip    @relation(fields: [tripId], references: [id], onDelete: Cascade)
   stop             Stop    @relation(fields: [stopId], references: [id], onDelete: Cascade)
 
@@ -252,6 +308,55 @@ model VehicleDeviceMap {
   confidence      Float        @default(1)
   refreshedAt     DateTime
   routePattern    RoutePattern @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+}
+
+model GnssObservation {
+  id          String   @id @default(cuid())
+  deviceId    String
+  observedAt  DateTime
+  collectedAt DateTime @default(now())
+  latitude    Float
+  longitude   Float
+  raw         Json?
+
+  @@unique([deviceId, observedAt, latitude, longitude])
+  @@index([deviceId, observedAt])
+  @@index([observedAt])
+}
+
+model SegmentTravelProfile {
+  id               String          @id @default(cuid())
+  routePatternId   String
+  fromSequence     Int
+  toSequence       Int
+  serviceDayClass  ServiceDayClass
+  bucketStartMinute Int
+  medianDurationSec Int
+  p90DurationSec   Int
+  medianSpeedKph   Float
+  sampleCount      Int
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  routePattern     RoutePattern    @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+
+  @@unique([routePatternId, fromSequence, toSequence, serviceDayClass, bucketStartMinute])
+  @@index([routePatternId, serviceDayClass, bucketStartMinute])
+}
+
+model TurnDelayProfile {
+  id               String          @id @default(cuid())
+  fromOsmNodeId    String
+  viaOsmNodeId     String
+  toOsmNodeId      String
+  serviceDayClass  ServiceDayClass
+  bucketStartMinute Int
+  penaltySec       Int
+  sampleCount      Int
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@unique([fromOsmNodeId, viaOsmNodeId, toOsmNodeId, serviceDayClass, bucketStartMinute])
+  @@index([serviceDayClass, bucketStartMinute])
 }
 
 model PlanQuery {

@@ -30,6 +30,7 @@ type ScheduleSourceContext = RoutePatternScheduleSource & {
     route: Route;
     stops: Array<{
       sequence: number;
+      distanceFromStart: number;
       stop: Stop & {
         translations: StopTranslation[];
       };
@@ -58,12 +59,13 @@ function buildPatternStopIndex(source: ScheduleSourceContext) {
   );
 }
 
-function fillPatternTimes(
+export function fillPatternTimes(
   source: ScheduleSourceContext,
   matchedStops: PatternStopMatch[],
   row: ParsedScheduleTrip,
 ) {
   const stopIndex = buildPatternStopIndex(source);
+  const distanceByIndex = source.routePattern.stops.map((item) => item.distanceFromStart);
   const values = Array<number | null>(source.routePattern.stops.length).fill(null);
   const estimated = new Set<number>();
 
@@ -85,8 +87,12 @@ function fillPatternTimes(
   });
 
   const knownIndexes = values
-    .map((value, index) => ({ value, index }))
-    .filter((item): item is { value: number; index: number } => item.value !== null);
+    .map((value, index) => ({
+      value,
+      index,
+      distanceFromStart: distanceByIndex[index] ?? index * 1_000,
+    }))
+    .filter((item): item is { value: number; index: number; distanceFromStart: number } => item.value !== null);
 
   if (knownIndexes.length < 2) {
     return null;
@@ -95,40 +101,52 @@ function fillPatternTimes(
   for (let cursor = 0; cursor < knownIndexes.length - 1; cursor += 1) {
     const start = knownIndexes[cursor];
     const end = knownIndexes[cursor + 1];
-    const distance = end.index - start.index;
-    if (distance <= 1) {
+    const spanDistance = end.distanceFromStart - start.distanceFromStart;
+    if (spanDistance <= 0 || end.index - start.index <= 1) {
       continue;
     }
 
-    for (let offset = 1; offset < distance; offset += 1) {
-      values[start.index + offset] = Math.round(
-        start.value + ((end.value - start.value) * offset) / distance,
+    for (let index = start.index + 1; index < end.index; index += 1) {
+      const pointDistance = distanceByIndex[index] ?? start.distanceFromStart;
+      const ratio = Math.max(
+        0,
+        Math.min(1, (pointDistance - start.distanceFromStart) / spanDistance),
       );
-      estimated.add(start.index + offset);
+      values[index] = Math.round(start.value + (end.value - start.value) * ratio);
+      estimated.add(index);
     }
   }
 
-  const leadingSlope =
-    knownIndexes.length > 1
-      ? (knownIndexes[1].value - knownIndexes[0].value) /
-        Math.max(1, knownIndexes[1].index - knownIndexes[0].index)
-      : 3;
+  const leadingSlopeDistance = Math.max(
+    1,
+    knownIndexes[1].distanceFromStart - knownIndexes[0].distanceFromStart,
+  );
+  const leadingSlope = (knownIndexes[1].value - knownIndexes[0].value) / leadingSlopeDistance;
   for (let index = knownIndexes[0].index - 1; index >= 0; index -= 1) {
-    values[index] = Math.round((values[index + 1] ?? knownIndexes[0].value) - leadingSlope);
+    const nextDistance = distanceByIndex[index + 1] ?? knownIndexes[0].distanceFromStart;
+    const currentDistance = distanceByIndex[index] ?? Math.max(0, nextDistance - 500);
+    values[index] = Math.round(
+      (values[index + 1] ?? knownIndexes[0].value) -
+        leadingSlope * Math.max(1, nextDistance - currentDistance),
+    );
     estimated.add(index);
   }
 
+  const trailingDistance = Math.max(
+    1,
+    knownIndexes[knownIndexes.length - 1].distanceFromStart -
+      knownIndexes[knownIndexes.length - 2].distanceFromStart,
+  );
   const trailingSlope =
-    knownIndexes.length > 1
-      ? (knownIndexes[knownIndexes.length - 1].value - knownIndexes[knownIndexes.length - 2].value) /
-        Math.max(
-          1,
-          knownIndexes[knownIndexes.length - 1].index - knownIndexes[knownIndexes.length - 2].index,
-        )
-      : 3;
+    (knownIndexes[knownIndexes.length - 1].value - knownIndexes[knownIndexes.length - 2].value) /
+    trailingDistance;
   for (let index = knownIndexes[knownIndexes.length - 1].index + 1; index < values.length; index += 1) {
+    const prevDistance =
+      distanceByIndex[index - 1] ?? knownIndexes[knownIndexes.length - 1].distanceFromStart;
+    const currentDistance = distanceByIndex[index] ?? prevDistance + 500;
     values[index] = Math.round(
-      (values[index - 1] ?? knownIndexes[knownIndexes.length - 1].value) + trailingSlope,
+      (values[index - 1] ?? knownIndexes[knownIndexes.length - 1].value) +
+        trailingSlope * Math.max(1, currentDistance - prevDistance),
     );
     estimated.add(index);
   }
@@ -262,6 +280,10 @@ export async function runTimetablesXlsxJob(runtime: WorkerRuntime): Promise<JobO
               arrivalMinutes: minutes,
               departureMinutes: minutes,
               isEstimated: expanded.estimatedColumns.includes(index),
+              timeSource: expanded.estimatedColumns.includes(index)
+                ? "DISTANCE_INTERPOLATED"
+                : "OFFICIAL",
+              confidence: expanded.estimatedColumns.includes(index) ? 0.6 : 1,
             };
           }),
         });

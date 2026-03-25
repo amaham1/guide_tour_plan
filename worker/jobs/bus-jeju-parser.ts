@@ -85,6 +85,53 @@ function normalizeVariantLabel(value: string | null | undefined) {
   return normalizeText(value).replace(/\s+/g, " ").trim();
 }
 
+function looksLikeRouteLabel(value: string | null | undefined) {
+  const normalized = normalizeVariantLabel(value);
+  if (!normalized || parseClockToMinutes(normalized) !== null) {
+    return false;
+  }
+
+  const compact = normalized.replace(/\s+/g, "");
+  return (
+    /^\d{2,4}(?:-\d+)?$/.test(compact) ||
+    (extractPrimaryRouteShortNameToken(normalized) !== null && /(?:번|노선|\/|,|\[)/.test(normalized))
+  );
+}
+
+function selectVariantColumnSeq(
+  grouped: Map<number, Map<number, string | null>>,
+  candidateColumnSeqs: number[],
+) {
+  let bestColumnSeq: number | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const columnSeq of candidateColumnSeqs) {
+    const values = [...grouped.entries()]
+      .filter(([rowSeq]) => rowSeq > 0)
+      .map(([, cells]) => normalizeVariantLabel(cells.get(columnSeq)))
+      .filter(Boolean);
+
+    if (values.length === 0) {
+      continue;
+    }
+
+    const routeLabelCount = values.filter((value) => looksLikeRouteLabel(value)).length;
+    const timeLikeCount = values.filter((value) => parseClockToMinutes(value) !== null).length;
+
+    if (routeLabelCount === 0) {
+      continue;
+    }
+
+    const score = routeLabelCount * 10 - timeLikeCount * 3;
+    if (score > bestScore) {
+      bestScore = score;
+      bestColumnSeq = columnSeq;
+    }
+  }
+
+  return bestColumnSeq;
+}
+
 function parseVariantBlocks(value: string | null) {
   const blocks = new Map<string, string>();
   const normalized = normalizeText(value);
@@ -343,8 +390,12 @@ export function parseScheduleTableRows(rows: RawScheduleCell[]) {
       isVariantColumn: isIgnoredScheduleHeader(columnName),
     }));
 
-  const variantColumnSeq =
-    orderedHeaderColumns.find((column) => column.isVariantColumn)?.columnSeq ?? null;
+  const variantColumnSeq = selectVariantColumnSeq(
+    grouped,
+    orderedHeaderColumns
+      .filter((column) => column.isVariantColumn)
+      .map((column) => column.columnSeq),
+  );
   const stopColumns = orderedHeaderColumns
     .filter((column) => !column.isVariantColumn)
     .map((column) => column.columnSeq);

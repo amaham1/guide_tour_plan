@@ -24,6 +24,12 @@ describe("route label helpers", () => {
     ]);
   });
 
+  it("does not treat clock values as route labels", () => {
+    expect(extractRouteShortNameTokens("07:10")).toEqual([]);
+    expect(extractRouteShortNameTokens("5:50(출발)")).toEqual([]);
+    expect(extractRouteShortNameTokens("202번 07:10")).toEqual(["202"]);
+  });
+
   it("builds exact match keys without broadening to sibling branches", () => {
     expect(buildRouteMatchKeys("500-2")).toEqual(["500-2"]);
     expect(buildRouteMatchKeys("수요맞춤형 111-1")).toEqual([

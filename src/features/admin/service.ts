@@ -13,6 +13,9 @@ export async function getAdminDashboard() {
     places,
     patterns,
     vehicleMaps,
+    segmentProfileCount,
+    latestCustomizeJob,
+    latestRouteGeometryRun,
   ] = await Promise.all([
     getPlannerCatalogStatus(db),
     db.dataSource.findMany({
@@ -55,6 +58,12 @@ export async function getAdminDashboard() {
       },
       include: {
         route: true,
+        geometry: true,
+        stopProjections: {
+          orderBy: {
+            sequence: "asc",
+          },
+        },
         stops: {
           include: {
             stop: true,
@@ -76,6 +85,30 @@ export async function getAdminDashboard() {
       take: 30,
     }),
     db.vehicleDeviceMap.findMany(),
+    db.segmentTravelProfile.count(),
+    db.ingestJob.findUnique({
+      where: {
+        key: "osrm-bus-customize",
+      },
+      select: {
+        lastSuccessfulAt: true,
+      },
+    }),
+    db.ingestRun.findFirst({
+      where: {
+        job: {
+          key: "route-geometries",
+        },
+      },
+      orderBy: {
+        startedAt: "desc",
+      },
+      select: {
+        startedAt: true,
+        endedAt: true,
+        meta: true,
+      },
+    }),
   ]);
 
   const poiJoinExceptions = places
@@ -109,6 +142,16 @@ export async function getAdminDashboard() {
       sequenceOk,
       distanceMonotonic,
       placeholderStopCount: unresolvedStopCount,
+      geometrySource: pattern.geometry?.sourceKind ?? null,
+      geometryConfidence: pattern.geometry?.confidence ?? null,
+      projectedStopCount: pattern.stopProjections.length,
+      meanSnapDistance:
+        pattern.stopProjections.length === 0
+          ? null
+          : Math.round(
+              pattern.stopProjections.reduce((sum, item) => sum + item.snapDistanceMeters, 0) /
+                pattern.stopProjections.length,
+            ),
     };
   });
 
@@ -124,6 +167,10 @@ export async function getAdminDashboard() {
   }));
 
   const latestVehicleMapRun = runs.find((run) => run.job.key === "vehicle-device-map");
+  const routeGeometryMeta =
+    latestRouteGeometryRun?.meta && typeof latestRouteGeometryRun.meta === "object"
+      ? (latestRouteGeometryRun.meta as Record<string, unknown>)
+      : null;
 
   return {
     catalogStatus,
@@ -139,6 +186,34 @@ export async function getAdminDashboard() {
       successRate:
         patterns.length === 0 ? 0 : Math.round((vehicleMaps.length / patterns.length) * 100),
       latestRunAt: latestVehicleMapRun?.endedAt ?? null,
+    },
+    geometryStats: {
+      totalPatterns: patterns.length,
+      geometryCoverage:
+        patterns.length === 0
+          ? 0
+          : Math.round((patterns.filter((pattern) => pattern.geometry).length / patterns.length) * 100),
+      projectionCoverage:
+        patterns.length === 0
+          ? 0
+          : Math.round(
+              (patterns.filter((pattern) => pattern.stopProjections.length === pattern.stops.length).length /
+                patterns.length) *
+                100,
+            ),
+      segmentProfileCount,
+      latestCustomizeAt: latestCustomizeJob?.lastSuccessfulAt ?? null,
+      latestRouteGeometryAt: latestRouteGeometryRun?.endedAt ?? latestRouteGeometryRun?.startedAt ?? null,
+      gtfsConfigured: Boolean(routeGeometryMeta?.gtfsConfigured),
+      gtfsSource: typeof routeGeometryMeta?.gtfsSource === "string" ? routeGeometryMeta.gtfsSource : null,
+      gtfsMatchCount: typeof routeGeometryMeta?.gtfsMatchCount === "number" ? routeGeometryMeta.gtfsMatchCount : 0,
+      fallbackCount: typeof routeGeometryMeta?.fallbackCount === "number" ? routeGeometryMeta.fallbackCount : 0,
+      gtfsLoadError:
+        typeof routeGeometryMeta?.gtfsLoadError === "string" ? routeGeometryMeta.gtfsLoadError : null,
+      gtfsProbe:
+        routeGeometryMeta?.gtfsProbe && typeof routeGeometryMeta.gtfsProbe === "object"
+          ? (routeGeometryMeta.gtfsProbe as Record<string, unknown>)
+          : null,
     },
   };
 }

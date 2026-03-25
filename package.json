@@ -7,6 +7,7 @@
     "dev:app": "next dev",
     "dev:osrm": "node scripts/osrm.mjs up",
     "dev:osrm:stop": "node scripts/osrm.mjs stop",
+    "gtfs:probe": "tsx scripts/gtfs.ts",
     "build": "prisma generate && next build",
     "start": "next start --port 5176",
     "typecheck": "tsc --noEmit",
@@ -23,6 +24,7 @@
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",
+    "adm-zip": "^0.5.16",
     "cheerio": "^1.1.2",
     "clsx": "^2.1.1",
     "csv-parse": "^6.2.0",
@@ -37,6 +39,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^25.5.0",
     "@types/react": "^19.2.3",
     "@types/react-dom": "^19.2.3",

@@ -4,7 +4,7 @@ import { haversineMeters } from "@/lib/osrm";
 const DATA_GO_KR_GNSS_URL =
   "https://apis.data.go.kr/6500000/jejuBusGnssPosition/viewGnssPosList";
 
-type GnssRecord = {
+export type GnssRecord = {
   deviceId: string;
   latitude: number;
   longitude: number;
@@ -16,7 +16,7 @@ type StopCoordinate = {
   longitude: number;
 };
 
-function formatDateKey(date: Date) {
+export function formatDateKey(date: Date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
@@ -48,7 +48,7 @@ function toNumber(value: unknown) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function toTimestamp(value: unknown) {
+export function toTimestamp(value: unknown) {
   const normalized = String(value ?? "").trim();
   if (!normalized) {
     return null;
@@ -58,7 +58,7 @@ function toTimestamp(value: unknown) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function normalizeGnssRecord(raw: Record<string, unknown>): GnssRecord | null {
+export function normalizeGnssRecord(raw: Record<string, unknown>): GnssRecord | null {
   const deviceId = String(raw.deviceId ?? raw.device_id ?? "").trim();
   const latitude = toNumber(raw.latitude);
   const longitude = toNumber(raw.logitude ?? raw.longitude);
@@ -76,9 +76,8 @@ function normalizeGnssRecord(raw: Record<string, unknown>): GnssRecord | null {
   };
 }
 
-export async function fetchLatestGnssPosition(
+export async function fetchGnssRecords(
   serviceKey: string,
-  deviceId: string,
   now = new Date(),
 ) {
   const fromDate = formatDateKey(now);
@@ -102,17 +101,23 @@ export async function fetchLatestGnssPosition(
   }
 
   const payload = (await response.json()) as Record<string, unknown>;
-  const rows = extractArray<Record<string, unknown>>(payload)
+  return extractArray<Record<string, unknown>>(payload)
     .map(normalizeGnssRecord)
     .filter((item): item is GnssRecord => item !== null)
-    .filter((item) => item.deviceId === deviceId)
     .sort((left, right) => {
       const leftTime = toTimestamp(left.time)?.getTime() ?? 0;
       const rightTime = toTimestamp(right.time)?.getTime() ?? 0;
       return rightTime - leftTime;
     });
+}
 
-  return rows[0] ?? null;
+export async function fetchLatestGnssPosition(
+  serviceKey: string,
+  deviceId: string,
+  now = new Date(),
+) {
+  const rows = await fetchGnssRecords(serviceKey, now);
+  return rows.find((item) => item.deviceId === deviceId) ?? null;
 }
 
 export function estimateDelayMinutesFromGnss(

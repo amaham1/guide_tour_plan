@@ -10,3 +10,6 @@ dist
 tmp_*
 docker/osrm/*.osm.pbf
 docker/osrm/*.osrm*
+docker/osrm/bus-distance.lua
+docker/osrm/bus-eta.lua
+docker/osrm/bus-eta-updates/

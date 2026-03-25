@@ -134,7 +134,10 @@ describe("transit worker jobs", () => {
           ]),
         },
         stop: {
-          findMany: vi.fn().mockResolvedValue([{ id: "406000816" }, { id: "406000817" }]),
+          findMany: vi.fn().mockResolvedValue([
+            { id: "406000816", displayName: "성산일출봉입구(동)", translations: [] },
+            { id: "406000817", displayName: "성산일출봉입구(서)", translations: [] },
+          ]),
         },
         routePattern: {
           upsert: patternUpsert,
@@ -176,6 +179,138 @@ describe("transit worker jobs", () => {
       ],
     });
     expect(patternDeleteMany).toHaveBeenCalled();
+  });
+
+  it("preserves terminal stops when live pattern sequences collapse multiple stops", async () => {
+    fetchBusJejuLineCandidatesMock.mockResolvedValue([
+      {
+        routeId: "405320204",
+        routeNm: "202-4",
+        routeNum: "202-4",
+        routeSubNm: "한담동",
+        upDnDir: "0",
+      },
+    ]);
+    fetchBusJejuLineInfoMock.mockResolvedValue({
+      routeId: "405320204",
+      routeNm: "202-4",
+      routeNum: "202-4",
+      routeSubNm: "한담동",
+      upDnDir: null,
+      orgtNm: "제주버스터미널(가상정류소)",
+      dstNm: "한담동",
+      busTypeStr: "1",
+      stationInfoList: [
+        {
+          stationId: "405000175",
+          stationNm: "동산교",
+          localX: "126.5000",
+          localY: "33.5000",
+          linkOrd: "4",
+        },
+        {
+          stationId: "405000097",
+          stationNm: "제주민속오일장[북]",
+          localX: "126.5100",
+          localY: "33.5100",
+          linkOrd: "18",
+        },
+        {
+          stationId: "405001198",
+          stationNm: "애월중학교",
+          localX: "126.5200",
+          localY: "33.5200",
+          linkOrd: "66",
+        },
+        {
+          stationId: "405002077",
+          stationNm: "애월환승정류장(애월리)",
+          localX: "126.5300",
+          localY: "33.5300",
+          linkOrd: "69",
+        },
+        {
+          stationId: "405001204",
+          stationNm: "한담동[서]",
+          localX: "126.5310",
+          localY: "33.5310",
+          linkOrd: "69",
+        },
+      ],
+    });
+
+    const patternStopCreateMany = vi.fn();
+    const runtime = {
+      env: {
+        busJejuBaseUrl: "https://bus.jeju.go.kr",
+      },
+      prisma: {
+        route: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: "route-202-4",
+              shortName: "202-4",
+            },
+          ]),
+        },
+        stop: {
+          findMany: vi.fn().mockResolvedValue([
+            { id: "stop-terminal", displayName: "제주버스터미널(종점)", translations: [] },
+            { id: "405000175", displayName: "동산교", translations: [] },
+            { id: "405000097", displayName: "제주민속오일장[북]", translations: [] },
+            { id: "405001198", displayName: "애월중학교", translations: [] },
+            { id: "405002077", displayName: "애월환승정류장(애월리)", translations: [] },
+            { id: "405001204", displayName: "한담동[서]", translations: [] },
+          ]),
+        },
+        routePattern: {
+          upsert: vi.fn(),
+          deleteMany: vi.fn(),
+        },
+        routePatternStop: {
+          deleteMany: vi.fn(),
+          createMany: patternStopCreateMany,
+        },
+      },
+    } as never;
+
+    const outcome = await runRoutePatternsOpenApiJob(runtime);
+
+    expect(outcome.successCount).toBe(1);
+    expect(patternStopCreateMany).toHaveBeenCalledWith({
+      data: [
+        {
+          routePatternId: "pattern-openapi-405320204-0-0",
+          stopId: "stop-terminal",
+          sequence: 3,
+          distanceFromStart: 0,
+        },
+        {
+          routePatternId: "pattern-openapi-405320204-0-0",
+          stopId: "405000175",
+          sequence: 4,
+          distanceFromStart: 1000,
+        },
+        {
+          routePatternId: "pattern-openapi-405320204-0-0",
+          stopId: "405000097",
+          sequence: 18,
+          distanceFromStart: 2000,
+        },
+        {
+          routePatternId: "pattern-openapi-405320204-0-0",
+          stopId: "405001198",
+          sequence: 66,
+          distanceFromStart: 3000,
+        },
+        {
+          routePatternId: "pattern-openapi-405320204-0-0",
+          stopId: "405001204",
+          sequence: 69,
+          distanceFromStart: 4000,
+        },
+      ],
+    });
   });
 
   it("creates multiple schedule sources from a single multi-variant page", async () => {
@@ -295,6 +430,139 @@ describe("transit worker jobs", () => {
       }),
     );
     expect(updatePattern).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not skip ordinary routes whose via text mentions village stop names", async () => {
+    fetchPlainTextMock.mockImplementation(async (url: string) => {
+      if (url.includes("detailSchedule?scheduleId=2401")) {
+        return `
+          <table>
+            <tr><td class="route-num">355번</td></tr>
+            <tr><td class="rotue-via">연동입구-남서광마을-대동마을-제주대학교병원</td></tr>
+            <tr><td class="route-waypoint">연동입구 -> 제주대학교병원</td></tr>
+          </table>
+        `;
+      }
+
+      return `<a href="/mobile/schedule/detailSchedule?scheduleId=2401">355번</a>`;
+    });
+
+    fetchScheduleTableMock.mockResolvedValue({
+      rows: [
+        { ROW_SEQ: 0, COLUMN_SEQ: 1, COLUMN_NM: "연동입구" },
+        { ROW_SEQ: 0, COLUMN_SEQ: 2, COLUMN_NM: "제주대학교병원" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 1, COLUMN_NM: "18:13" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 2, COLUMN_NM: "18:39" },
+      ],
+    });
+
+    const updateMany = vi.fn();
+    const upsert = vi.fn();
+    const updatePattern = vi.fn();
+    const runtime = {
+      env: {
+        busJejuBaseUrl: "https://bus.jeju.go.kr",
+        routeSearchTerms: [],
+      },
+      prisma: {
+        routePattern: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: "pattern-355",
+              displayName: "355 연동입구 제주대학교병원",
+              directionLabel: "연동입구 -> 제주대학교병원",
+              route: { shortName: "355" },
+              stops: [
+                {
+                  sequence: 1,
+                  stop: { id: "s1", displayName: "연동입구", translations: [] },
+                },
+                {
+                  sequence: 2,
+                  stop: { id: "s2", displayName: "제주대학교병원", translations: [] },
+                },
+              ],
+            },
+          ]),
+          update: updatePattern,
+        },
+        routePatternScheduleSource: {
+          updateMany,
+          upsert,
+        },
+      },
+    } as never;
+
+    const outcome = await runRoutesHtmlJob(runtime);
+
+    expect(outcome.successCount).toBe(1);
+    expect(outcome.meta).toMatchObject({
+      skippedSpecialSchedules: [],
+    });
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          scheduleId: "2401",
+          routePatternId: "pattern-355",
+        }),
+      }),
+    );
+    expect(updatePattern).toHaveBeenCalledTimes(1);
+  });
+
+  it("deactivates stale schedule sources when a schedule is skipped as special", async () => {
+    fetchPlainTextMock.mockImplementation(async (url: string) => {
+      if (url.includes("detailSchedule?scheduleId=2402")) {
+        return `
+          <table>
+            <tr><td class="route-num">우도급행</td></tr>
+            <tr><td class="route-waypoint">Terminal -> Udo</td></tr>
+          </table>
+        `;
+      }
+
+      return `<a href="/mobile/schedule/detailSchedule?scheduleId=2402">우도급행</a>`;
+    });
+
+    const updateMany = vi.fn();
+    const runtime = {
+      env: {
+        busJejuBaseUrl: "https://bus.jeju.go.kr",
+        routeSearchTerms: [],
+      },
+      prisma: {
+        routePattern: {
+          findMany: vi.fn().mockResolvedValue([]),
+        },
+        routePatternScheduleSource: {
+          updateMany,
+          upsert: vi.fn(),
+        },
+      },
+    } as never;
+
+    const outcome = await runRoutesHtmlJob(runtime);
+
+    expect(outcome.successCount).toBe(0);
+    expect(outcome.meta).toMatchObject({
+      skippedSpecialSchedules: [
+        {
+          scheduleId: "2402",
+          shortName: "우도급행",
+          reason: "SPECIAL_ROUTE_EXCLUDED",
+        },
+      ],
+    });
+    expect(updateMany).toHaveBeenCalledWith({
+      where: {
+        scheduleId: "2402",
+      },
+      data: {
+        isActive: false,
+      },
+    });
+    expect(fetchScheduleTableMock).not.toHaveBeenCalled();
   });
 
   it("expands only the selected variant rows onto the authoritative stop sequence", async () => {

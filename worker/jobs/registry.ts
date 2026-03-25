@@ -1,6 +1,10 @@
+import { runGnssHistoryJob } from "@/worker/jobs/gnss-history";
+import { runOsrmBusCustomizeJob } from "@/worker/jobs/osrm-bus-customize";
+import { runRouteGeometriesJob } from "@/worker/jobs/route-geometries";
 import { runRoutePatternsOpenApiJob } from "@/worker/jobs/route-patterns-openapi";
 import { runRoutesOpenApiJob } from "@/worker/jobs/routes-openapi";
 import { runRoutesHtmlJob } from "@/worker/jobs/routes-html";
+import { runSegmentProfilesJob } from "@/worker/jobs/segment-profiles";
 import { runStopTranslationsJob } from "@/worker/jobs/stop-translations";
 import { runStopsJob } from "@/worker/jobs/stops";
 import { runTimetablesXlsxJob } from "@/worker/jobs/timetables-xlsx";
@@ -16,9 +20,13 @@ export const jobRegistry: Record<string, JobHandler> = {
   "routes-openapi": runRoutesOpenApiJob,
   "route-patterns-openapi": runRoutePatternsOpenApiJob,
   "routes-html": runRoutesHtmlJob,
+  "route-geometries": runRouteGeometriesJob,
   "timetables-xlsx": runTimetablesXlsxJob,
   "walk-links": runWalkLinksJob,
   "vehicle-device-map": runVehicleDeviceMapJob,
+  "gnss-history": runGnssHistoryJob,
+  "segment-profiles": runSegmentProfilesJob,
+  "osrm-bus-customize": runOsrmBusCustomizeJob,
   "transit-audit": runTransitAuditJob,
   "visit-jeju-places": runVisitJejuPlacesJob,
 };

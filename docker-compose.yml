@@ -9,13 +9,19 @@ services:
     env_file:
       - .env
     environment:
-      OSRM_BASE_URL: http://osrm:5000
+      OSRM_BASE_URL: http://osrm-foot:5000
+      OSRM_FOOT_BASE_URL: http://osrm-foot:5000
+      OSRM_BUS_DISTANCE_BASE_URL: http://osrm-bus-distance:5000
+      OSRM_BUS_ETA_BASE_URL: http://osrm-bus-eta:5000
+      OSRM_BUS_ETA_DATASET_NAME: bus-eta
       DATABASE_URL: file:./prisma/dev.db
     volumes:
       - .:/app
       - /app/node_modules
     depends_on:
-      - osrm
+      - osrm-foot
+      - osrm-bus-distance
+      - osrm-bus-eta
 
   worker:
     build:
@@ -25,18 +31,45 @@ services:
     env_file:
       - .env
     environment:
-      OSRM_BASE_URL: http://osrm:5000
+      OSRM_BASE_URL: http://osrm-foot:5000
+      OSRM_FOOT_BASE_URL: http://osrm-foot:5000
+      OSRM_BUS_DISTANCE_BASE_URL: http://osrm-bus-distance:5000
+      OSRM_BUS_ETA_BASE_URL: http://osrm-bus-eta:5000
+      OSRM_BUS_ETA_DATASET_NAME: bus-eta
       DATABASE_URL: file:./prisma/dev.db
     volumes:
       - .:/app
       - /app/node_modules
     depends_on:
-      - osrm
+      - osrm-foot
+      - osrm-bus-distance
+      - osrm-bus-eta
 
-  osrm:
+  osrm-foot:
     image: ghcr.io/project-osrm/osrm-backend:latest
     command: osrm-routed --algorithm mld /data/jeju-non-military.osrm
     ports:
       - "5000:5000"
+    volumes:
+      - ./docker/osrm:/data
+
+  osrm-bus-distance:
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    command: osrm-routed --algorithm mld /data/jeju-non-military-bus-distance.osrm
+    ports:
+      - "5001:5000"
+    volumes:
+      - ./docker/osrm:/data
+
+  osrm-bus-eta:
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    environment:
+      OSRM_BUS_ETA_DATASET_NAME: bus-eta
+    command:
+      - sh
+      - -lc
+      - osrm-routed --algorithm mld --shared-memory=1 --dataset-name "$${OSRM_BUS_ETA_DATASET_NAME:-bus-eta}" || osrm-routed --algorithm mld /data/jeju-non-military-bus-eta.osrm
+    ports:
+      - "5002:5000"
     volumes:
       - ./docker/osrm:/data
