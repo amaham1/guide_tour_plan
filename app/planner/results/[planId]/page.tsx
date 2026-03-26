@@ -11,6 +11,40 @@ const metricIcons = {
   realtime: RefreshCw,
 };
 
+function timeReliabilityModeLabel(mode: string) {
+  switch (mode) {
+    case "OFFICIAL_ONLY":
+      return "공식만";
+    case "INCLUDE_ESTIMATED":
+      return "추정 포함";
+    case "ALLOW_ROUGH":
+      return "대략까지 허용";
+    default:
+      return mode;
+  }
+}
+
+function timeReliabilityLabel(reliability: string) {
+  switch (reliability) {
+    case "OFFICIAL":
+      return "공식";
+    case "ESTIMATED":
+      return "추정";
+    case "ROUGH":
+      return "대략";
+    default:
+      return reliability;
+  }
+}
+
+function formatTimeRange(startAt: string | null | undefined, endAt: string | null | undefined) {
+  if (!startAt || !endAt) {
+    return null;
+  }
+
+  return `${formatClock(startAt)} - ${formatClock(endAt)}`;
+}
+
 export default async function PlannerResultsPage({
   params,
 }: {
@@ -54,11 +88,9 @@ export default async function PlannerResultsPage({
             ))}
           </div>
 
-          {result.includeGeneratedTimes ? (
-            <div className="mt-4 rounded-2xl border border-sunrise/20 bg-sunrise/10 px-4 py-3 text-sm text-ink/75">
-              생성 시각 포함 옵션이 켜져 있어 공식 시간표가 비어 있는 중간 정류장도 함께 계산했습니다.
-            </div>
-          ) : null}
+          <div className="mt-4 rounded-2xl border border-sunrise/20 bg-sunrise/10 px-4 py-3 text-sm text-ink/75">
+            현재 계산 모드: {timeReliabilityModeLabel(result.timeReliabilityMode)}
+          </div>
         </section>
 
         {result.fallbackMessage ? (
@@ -98,6 +130,11 @@ export default async function PlannerResultsPage({
                   </p>
 
                   <div className="mt-4 flex flex-wrap gap-2">
+                    {candidate.summary.worstTimeReliability === "ROUGH" ? (
+                      <span className="rounded-full border border-coral/25 bg-coral/10 px-3 py-1 text-xs font-semibold text-coral">
+                        대략 fallback
+                      </span>
+                    ) : null}
                     {candidate.warnings.map((warning) => (
                       <span
                         key={`${warning.code}-${warning.message}`}
@@ -105,6 +142,8 @@ export default async function PlannerResultsPage({
                       >
                         {warning.code === "OPENING_HOURS_CONFLICT"
                           ? "운영시간 충돌"
+                          : warning.code === "ROUGH_STOP_TIMES"
+                            ? "대략 시각"
                           : warning.code === "ESTIMATED_STOP_TIMES"
                             ? "생성 시각 포함"
                             : warning.code === "REALTIME_UNAVAILABLE"
@@ -146,7 +185,11 @@ export default async function PlannerResultsPage({
                   </div>
 
                   <div className="mt-5 rounded-2xl border border-ink/8 bg-white px-4 py-3 text-sm text-ink/70">
-                    최종 도착 시각 {formatDateTime(candidate.summary.finalArrivalAt)}
+                    {candidate.summary.worstTimeReliability === "ROUGH" &&
+                    candidate.summary.finalArrivalWindowStartAt &&
+                    candidate.summary.finalArrivalWindowEndAt
+                      ? `최종 도착 시각 ${formatTimeRange(candidate.summary.finalArrivalWindowStartAt, candidate.summary.finalArrivalWindowEndAt)}`
+                      : `최종 도착 시각 ${formatDateTime(candidate.summary.finalArrivalAt)}`}
                   </div>
 
                   {candidate.warnings.length > 0 ? (
@@ -176,13 +219,18 @@ export default async function PlannerResultsPage({
                             <h3 className="mt-1 text-base font-semibold text-ink">
                               {leg.title}
                             </h3>
+                            <p className="mt-1 text-xs font-medium text-ink/45">
+                              {timeReliabilityLabel(leg.timeReliability)}
+                            </p>
                             {leg.subtitle ? (
                               <p className="mt-1 text-sm text-ink/60">{leg.subtitle}</p>
                             ) : null}
                           </div>
                           <div className="text-right text-sm text-ink/60">
                             <p>
-                              {formatClock(leg.startAt)} - {formatClock(leg.endAt)}
+                              {leg.timeReliability === "ROUGH"
+                                ? formatTimeRange(leg.startWindowAt, leg.endWindowAt)
+                                : `${formatClock(leg.startAt)} - ${formatClock(leg.endAt)}`}
                             </p>
                             <p>{formatDuration(leg.durationMinutes)}</p>
                           </div>

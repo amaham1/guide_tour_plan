@@ -38,6 +38,13 @@ const MAX_DERIVED_ANCHOR_DISTANCE_METERS = 12_000;
 const MAX_DERIVED_ANCHOR_MINUTES = 45;
 const MIN_DERIVED_PROJECTION_CONFIDENCE = 0.55;
 const MAX_DERIVED_SNAP_DISTANCE_METERS = 250;
+const MAX_ROUGH_ANCHOR_STOP_GAP = 20;
+const MAX_ROUGH_ANCHOR_DISTANCE_METERS = 20_000;
+const MAX_ROUGH_ANCHOR_MINUTES = 70;
+const MAX_ROUGH_HALF_WINDOW_MINUTES = 12;
+const MIN_ROUGH_HALF_WINDOW_MINUTES = 4;
+const ROUGH_LOW_CONFIDENCE_THRESHOLD = 0.55;
+const ROUGH_CONFIDENCE = 0.45;
 
 type ScheduleSourceContext = RoutePatternScheduleSource & {
   routePattern: RoutePattern & {
@@ -81,6 +88,8 @@ type DerivedPatternTimePoint = {
   confidence: number;
   anchorStartSequence: number | null;
   anchorEndSequence: number | null;
+  windowStartMinutes: number | null;
+  windowEndMinutes: number | null;
 };
 
 type OfficialPatternResult = {
@@ -101,6 +110,14 @@ type PatternProjectionPoint = {
   offsetMeters: number;
   snapDistanceMeters: number;
   confidence: number;
+};
+
+type PatternProgressPoint = {
+  patternIndex: number;
+  stopId: string;
+  sequence: number;
+  meters: number;
+  projectionConfidence: number | null;
 };
 
 type TripStopProfile = {
@@ -240,6 +257,100 @@ function extractOfficialAnchors(
   return officialAnchors;
 }
 
+function hasStrictlyIncreasingMeters(points: PatternProgressPoint[]) {
+  for (let index = 1; index < points.length; index += 1) {
+    if (points[index - 1].meters >= points[index].meters) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function buildDistanceProgressPoints(
+  source: ScheduleSourceContext,
+  leftAnchor: MatchedPatternTimePoint & { minutes: number },
+  rightAnchor: MatchedPatternTimePoint & { minutes: number },
+) {
+  const points: PatternProgressPoint[] = [];
+
+  for (let patternIndex = leftAnchor.patternIndex; patternIndex <= rightAnchor.patternIndex; patternIndex += 1) {
+    const patternStop = source.routePattern.stops[patternIndex];
+    if (!patternStop || !Number.isFinite(patternStop.distanceFromStart)) {
+      return null;
+    }
+
+    points.push({
+      patternIndex,
+      stopId: patternStop.stop.id,
+      sequence: patternStop.sequence,
+      meters: patternStop.distanceFromStart,
+      projectionConfidence: null,
+    });
+  }
+
+  return hasStrictlyIncreasingMeters(points) ? points : null;
+}
+
+function buildProjectionProgressPoints(
+  projections: Array<PatternProjectionPoint | null>,
+  leftAnchor: MatchedPatternTimePoint & { minutes: number },
+  rightAnchor: MatchedPatternTimePoint & { minutes: number },
+) {
+  const segment = projections.slice(leftAnchor.patternIndex, rightAnchor.patternIndex + 1);
+  if (segment.some((projection) => projection === null)) {
+    return null;
+  }
+
+  const normalized = segment as PatternProjectionPoint[];
+  if (
+    normalized.some(
+      (projection) => projection.snapDistanceMeters > MAX_DERIVED_SNAP_DISTANCE_METERS,
+    )
+  ) {
+    return null;
+  }
+
+  const points = normalized.map((projection) => ({
+    patternIndex: projection.patternIndex,
+    stopId: projection.stopId,
+    sequence: projection.sequence,
+    meters: projection.offsetMeters,
+    projectionConfidence: projection.confidence,
+  }));
+
+  return hasStrictlyIncreasingMeters(points) ? points : null;
+}
+
+function clampMinutes(minutes: number, minMinutes: number, maxMinutes: number) {
+  return Math.min(maxMinutes, Math.max(minMinutes, minutes));
+}
+
+function buildRoughHalfWindowMinutes(options: {
+  interiorStopCount: number;
+  spanMeters: number;
+  usedProjectionFallback: boolean;
+  minProjectionConfidence: number | null;
+}) {
+  const projectionPenalty = options.usedProjectionFallback ? 2 : 0;
+  const lowConfidencePenalty =
+    options.usedProjectionFallback &&
+    options.minProjectionConfidence !== null &&
+    options.minProjectionConfidence < ROUGH_LOW_CONFIDENCE_THRESHOLD
+      ? 2
+      : 0;
+
+  return clampMinutes(
+    4 +
+      Math.ceil(options.interiorStopCount / 6) +
+      Math.ceil(options.spanMeters / 5_000) +
+      projectionPenalty +
+      lowConfidencePenalty,
+    MIN_ROUGH_HALF_WINDOW_MINUTES,
+    MAX_ROUGH_HALF_WINDOW_MINUTES,
+  );
+}
+
 export function fillPatternTimes(
   source: ScheduleSourceContext,
   matchedStops: PatternStopMatch[],
@@ -341,9 +452,116 @@ export function derivePatternTimes(
         confidence: segmentConfidence,
         anchorStartSequence: leftAnchor.sequence,
         anchorEndSequence: rightAnchor.sequence,
+        windowStartMinutes: null,
+        windowEndMinutes: null,
       });
       derivedStopCount += 1;
       previousMinutes = nextMinutes;
+    }
+  }
+
+  if (derivedStopCount === 0) {
+    return null;
+  }
+
+  return {
+    times: derivedRecords,
+    derivedStopCount,
+    anchorPairCount,
+  } satisfies DerivedPatternResult;
+}
+
+export function deriveRoughPatternTimes(
+  source: ScheduleSourceContext,
+  matchedStops: PatternStopMatch[],
+  row: ParsedScheduleTrip,
+  columnIndexes?: number[],
+) {
+  const officialAnchors = extractOfficialAnchors(source, matchedStops, row, columnIndexes);
+  if (!officialAnchors) {
+    return null;
+  }
+
+  const projections = buildProjectionPoints(source);
+  const derivedRecords: DerivedPatternTimePoint[] = [];
+  let derivedStopCount = 0;
+  let anchorPairCount = 0;
+
+  for (let anchorIndex = 0; anchorIndex < officialAnchors.length - 1; anchorIndex += 1) {
+    const leftAnchor = officialAnchors[anchorIndex];
+    const rightAnchor = officialAnchors[anchorIndex + 1];
+    const interiorStopCount = rightAnchor.patternIndex - leftAnchor.patternIndex - 1;
+
+    if (interiorStopCount <= 0 || interiorStopCount > MAX_ROUGH_ANCHOR_STOP_GAP) {
+      continue;
+    }
+
+    const distanceProgress = buildDistanceProgressPoints(source, leftAnchor, rightAnchor);
+    const projectionProgress =
+      distanceProgress === null
+        ? buildProjectionProgressPoints(projections, leftAnchor, rightAnchor)
+        : null;
+    const progressPoints = distanceProgress ?? projectionProgress;
+
+    if (!progressPoints) {
+      continue;
+    }
+
+    const leftProgress = progressPoints[0];
+    const rightProgress = progressPoints[progressPoints.length - 1];
+    const spanMeters = rightProgress.meters - leftProgress.meters;
+    const spanMinutes = rightAnchor.minutes - leftAnchor.minutes;
+
+    if (
+      spanMeters <= 0 ||
+      spanMeters > MAX_ROUGH_ANCHOR_DISTANCE_METERS ||
+      spanMinutes <= 0 ||
+      spanMinutes > MAX_ROUGH_ANCHOR_MINUTES
+    ) {
+      continue;
+    }
+
+    anchorPairCount += 1;
+    const usedProjectionFallback = distanceProgress === null;
+    const minProjectionConfidence =
+      usedProjectionFallback && projectionProgress
+        ? Math.min(...projectionProgress.map((point) => point.projectionConfidence ?? 1))
+        : null;
+    const halfWindowMinutes = buildRoughHalfWindowMinutes({
+      interiorStopCount,
+      spanMeters,
+      usedProjectionFallback,
+      minProjectionConfidence,
+    });
+    let previousMinutes = leftAnchor.minutes;
+
+    for (
+      let patternIndex = leftAnchor.patternIndex + 1;
+      patternIndex < rightAnchor.patternIndex;
+      patternIndex += 1
+    ) {
+      const progressPoint = progressPoints[patternIndex - leftAnchor.patternIndex];
+      const offsetWithinSegment = progressPoint.meters - leftProgress.meters;
+      const ratio = clampRatio(offsetWithinSegment / spanMeters);
+      const interpolatedMinutes = leftAnchor.minutes + Math.round(spanMinutes * ratio);
+      const centerMinutes = Math.min(
+        rightAnchor.minutes,
+        Math.max(previousMinutes, interpolatedMinutes),
+      );
+
+      derivedRecords.push({
+        stopId: progressPoint.stopId,
+        sequence: progressPoint.sequence,
+        time: minutesToClock(centerMinutes),
+        timeSource: "DISTANCE_INTERPOLATED",
+        confidence: ROUGH_CONFIDENCE,
+        anchorStartSequence: leftAnchor.sequence,
+        anchorEndSequence: rightAnchor.sequence,
+        windowStartMinutes: centerMinutes - halfWindowMinutes,
+        windowEndMinutes: centerMinutes + halfWindowMinutes,
+      });
+      derivedStopCount += 1;
+      previousMinutes = centerMinutes;
     }
   }
 
@@ -522,12 +740,24 @@ export async function runTimetablesXlsxJob(runtime: WorkerRuntime): Promise<JobO
           row,
           tripStopProfile.columnIndexes,
         );
-        if (!derived) {
+        const roughDerived = deriveRoughPatternTimes(
+          source,
+          match.matchedStops,
+          row,
+          tripStopProfile.columnIndexes,
+        );
+        const strictSequences = new Set(derived?.times.map((timePoint) => timePoint.sequence) ?? []);
+        const combinedDerivedTimes = [
+          ...(derived?.times ?? []),
+          ...(roughDerived?.times.filter((timePoint) => !strictSequences.has(timePoint.sequence)) ?? []),
+        ];
+
+        if (combinedDerivedTimes.length === 0) {
           continue;
         }
 
         await runtime.prisma.derivedStopTime.createMany({
-          data: derived.times.map((timePoint) => {
+          data: combinedDerivedTimes.map((timePoint) => {
             const minutes = parseClockToMinutes(timePoint.time) ?? 0;
             return {
               tripId: trip.id,
@@ -535,6 +765,8 @@ export async function runTimetablesXlsxJob(runtime: WorkerRuntime): Promise<JobO
               sequence: timePoint.sequence,
               arrivalMinutes: minutes,
               departureMinutes: minutes,
+              windowStartMinutes: timePoint.windowStartMinutes,
+              windowEndMinutes: timePoint.windowEndMinutes,
               timeSource: timePoint.timeSource,
               confidence: timePoint.confidence,
               anchorStartSequence: timePoint.anchorStartSequence,
@@ -542,7 +774,7 @@ export async function runTimetablesXlsxJob(runtime: WorkerRuntime): Promise<JobO
             };
           }),
         });
-        derivedStopTimeCount += derived.times.length;
+        derivedStopTimeCount += combinedDerivedTimes.length;
       }
 
       if (sourceTripCount === 0) {

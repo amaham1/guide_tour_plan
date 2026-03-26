@@ -25,6 +25,30 @@ function formatCountdown(nextActionAt: string | null, now: number) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatLegTime(leg: ExecutionStatusDto["legs"][number]) {
+  if (leg.timeReliability === "ROUGH" && leg.startWindowAt && leg.endWindowAt) {
+    return `${formatClock(leg.startWindowAt)} - ${formatClock(leg.endWindowAt)}`;
+  }
+
+  return `${formatClock(leg.startAt)} - ${formatClock(leg.endAt)}`;
+}
+
+function formatLegStart(leg: ExecutionStatusDto["legs"][number]) {
+  if (leg.timeReliability === "ROUGH" && leg.startWindowAt && leg.endWindowAt) {
+    return `${formatClock(leg.startWindowAt)} - ${formatClock(leg.endWindowAt)}`;
+  }
+
+  return formatClock(leg.startAt);
+}
+
+function realtimeCopy(status: ExecutionStatusDto) {
+  if (status.realtimeApplied) {
+    return `${status.delayMinutes}분`;
+  }
+
+  return "미적용";
+}
+
 export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
   const [status, setStatus] = useState(initialStatus);
   const [now, setNow] = useState(Date.now());
@@ -87,9 +111,9 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
           </div>
           <div className="rounded-3xl border border-ink/8 bg-white p-5">
             <LocateFixed className="size-5 text-lagoon" />
-            <p className="mt-3 text-sm text-ink/55">실시간 적용</p>
+            <p className="mt-3 text-sm text-ink/55">실시간 반영</p>
             <p className="mt-2 text-3xl font-semibold text-ink">
-              {status.realtimeApplied ? `${status.delayMinutes}분` : "미적용"}
+              {realtimeCopy(status)}
             </p>
             <p className="mt-2 text-sm text-ink/55">{status.notice}</p>
             {status.realtimeReason ? (
@@ -114,14 +138,13 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
                   </p>
                 ) : null}
                 <p className="mt-3 text-sm text-ink/55">
-                  {formatClock(status.currentLeg.startAt)} -{" "}
-                  {formatClock(status.currentLeg.endAt)} ·{" "}
+                  {formatLegTime(status.currentLeg)} ·{" "}
                   {formatDuration(status.currentLeg.durationMinutes)}
                 </p>
               </>
             ) : (
               <p className="mt-2 text-sm text-ink/55">
-                곧 시작할 구간을 기다리는 중입니다.
+                아직 시작 전이거나 다음 구간을 기다리는 중입니다.
               </p>
             )}
           </div>
@@ -139,11 +162,11 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
                   <p className="mt-1 text-sm text-ink/60">{status.nextLeg.subtitle}</p>
                 ) : null}
                 <p className="mt-3 text-sm text-ink/55">
-                  {formatClock(status.nextLeg.startAt)} 시작 예정
+                  {formatLegStart(status.nextLeg)} 시작 예정
                 </p>
               </>
             ) : (
-              <p className="mt-2 text-sm text-ink/55">다음 leg가 없습니다.</p>
+              <p className="mt-2 text-sm text-ink/55">다음 구간이 없습니다.</p>
             )}
           </div>
 
@@ -151,8 +174,7 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
             <div className="rounded-3xl border border-coral/20 bg-coral/10 p-5">
               <p className="text-sm font-semibold text-coral">대체 경로 확인 권장</p>
               <p className="mt-2 text-sm text-ink/75">
-                현재 지연으로 다음 연결이 불안정할 수 있습니다. 다음 탑승 구간을 현장에서
-                다시 확인해 주세요.
+                현재 지연으로 다음 연결이 불안정할 수 있습니다. 다음 탑승 구간을 현장에서 다시 확인해 주세요.
               </p>
             </div>
           ) : null}
@@ -202,6 +224,7 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
                         {leg.kind}
                       </p>
                       <h4 className="mt-1 text-base font-semibold">{leg.title}</h4>
+                      <p className="mt-1 text-xs text-white/45">{leg.timeReliability}</p>
                       {leg.subtitle ? (
                         <p className="mt-1 text-sm text-white/60">{leg.subtitle}</p>
                       ) : null}
@@ -209,9 +232,7 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
                   </div>
 
                   <div className="text-right text-sm text-white/60">
-                    <p>
-                      {formatClock(leg.startAt)} - {formatClock(leg.endAt)}
-                    </p>
+                    <p>{formatLegTime(leg)}</p>
                     <p>{formatDuration(leg.durationMinutes)}</p>
                   </div>
                 </div>

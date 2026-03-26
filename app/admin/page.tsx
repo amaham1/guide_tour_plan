@@ -49,7 +49,7 @@ export default async function AdminPage() {
             <RunAllButton />
           </div>
 
-          <div className="mt-6 grid gap-4 sm:grid-cols-4 xl:grid-cols-8">
+          <div className="mt-6 grid gap-4 sm:grid-cols-3 xl:grid-cols-5">
             {[
               ["POI", dashboard.catalogStatus.placeCount],
               ["Stop", dashboard.catalogStatus.stopCount],
@@ -57,6 +57,8 @@ export default async function AdminPage() {
               ["Trip", dashboard.catalogStatus.tripCount],
               ["Official Stop", dashboard.catalogStatus.officialStopCount],
               ["Generated Stop", dashboard.catalogStatus.generatedStopCount],
+              ["Estimated Stop", dashboard.catalogStatus.estimatedGeneratedStopCount],
+              ["Rough Stop", dashboard.catalogStatus.roughGeneratedStopCount],
               ["Walk Link", dashboard.catalogStatus.walkLinkCount],
               ["Geometry", dashboard.catalogStatus.routeGeometryCount],
               ["Projection", dashboard.catalogStatus.stopProjectionCount],

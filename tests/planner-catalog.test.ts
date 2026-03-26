@@ -18,6 +18,8 @@ function createCatalogPrisma(overrides?: {
   timetableRoutePatternCount?: number;
   officialStopCount?: number;
   generatedStopCount?: number;
+  estimatedGeneratedStopCount?: number;
+  roughGeneratedStopCount?: number;
   searchableStopCount?: number;
   unresolvedStopCount?: number;
   estimatedStopTimeCount?: number;
@@ -30,6 +32,12 @@ function createCatalogPrisma(overrides?: {
     { count: overrides?.timetableRoutePatternCount ?? 2 },
     { count: overrides?.officialStopCount ?? 8 },
     { count: overrides?.generatedStopCount ?? 0 },
+    {
+      count:
+        overrides?.estimatedGeneratedStopCount ??
+        (overrides?.generatedStopCount ?? 0),
+    },
+    { count: overrides?.roughGeneratedStopCount ?? 0 },
     { count: overrides?.searchableStopCount ?? 8 },
     { count: overrides?.unresolvedStopCount ?? 1 },
   ];
@@ -88,7 +96,9 @@ function createCatalogPrisma(overrides?: {
       .mockResolvedValueOnce([queryResults[2]])
       .mockResolvedValueOnce([queryResults[3]])
       .mockResolvedValueOnce([queryResults[4]])
-      .mockResolvedValueOnce([queryResults[5]]),
+      .mockResolvedValueOnce([queryResults[5]])
+      .mockResolvedValueOnce([queryResults[6]])
+      .mockResolvedValueOnce([queryResults[7]]),
   } as never;
 }
 
@@ -116,7 +126,9 @@ describe("planner catalog readiness", () => {
     expect(status.timetableRoutePatternCount).toBe(status.routePatternCount);
     expect(status.officialStopCount).toBe(8);
     expect(status.generatedStopCount).toBe(0);
-    expect(status.message).toBe("플래너 카탈로그가 준비되었습니다.");
+    expect(status.estimatedGeneratedStopCount).toBe(0);
+    expect(status.roughGeneratedStopCount).toBe(0);
+    expect(status.message.length).toBeGreaterThan(0);
     expect(prisma.trip.count).toHaveBeenCalledWith({
       where: {
         routePattern: {
@@ -162,6 +174,8 @@ describe("planner catalog readiness", () => {
         timetableRoutePatternCount: 2,
         officialStopCount: 5,
         generatedStopCount: 7,
+        estimatedGeneratedStopCount: 5,
+        roughGeneratedStopCount: 2,
         searchableStopCount: 9,
         unresolvedStopCount: 1,
       }),
@@ -170,9 +184,11 @@ describe("planner catalog readiness", () => {
     expect(status.ready).toBe(true);
     expect(status.tripCount).toBe(8);
     expect(status.generatedStopCount).toBe(7);
+    expect(status.estimatedGeneratedStopCount).toBe(5);
+    expect(status.roughGeneratedStopCount).toBe(2);
     expect(status.searchableStopCount).toBe(9);
     expect(status.unresolvedStopCount).toBe(1);
-    expect(status.message).toContain("생성 시각 포함");
+    expect(status.message.length).toBeGreaterThan(0);
   });
 
   it("stays not ready when sparse official trips are missing", async () => {

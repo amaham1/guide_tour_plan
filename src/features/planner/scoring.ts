@@ -1,7 +1,20 @@
 import { PlanPreference } from "@prisma/client";
 import type { CandidateMetrics } from "@/features/planner/types";
 
+function getReliabilityPenalty(metrics: CandidateMetrics) {
+  switch (metrics.worstTimeReliability) {
+    case "ROUGH":
+      return 18 + metrics.roughWindowMinutes;
+    case "ESTIMATED":
+      return 6;
+    case "OFFICIAL":
+      return 0;
+  }
+}
+
 export function scoreCandidate(kind: PlanPreference, metrics: CandidateMetrics) {
+  const reliabilityPenalty = getReliabilityPenalty(metrics);
+
   switch (kind) {
     case "FASTEST":
       return (
@@ -9,7 +22,7 @@ export function scoreCandidate(kind: PlanPreference, metrics: CandidateMetrics) 
         metrics.transfers * 12 +
         metrics.totalWalkMinutes * 0.65 +
         metrics.safetyBufferCost +
-        (metrics.usesEstimatedStopTimes ? 6 : 0)
+        reliabilityPenalty
       );
     case "LEAST_WALK":
       return (
@@ -17,7 +30,7 @@ export function scoreCandidate(kind: PlanPreference, metrics: CandidateMetrics) 
         metrics.transfers * 9 +
         metrics.finalArrivalMinutes * 0.35 +
         metrics.safetyBufferCost +
-        (metrics.usesEstimatedStopTimes ? 6 : 0)
+        reliabilityPenalty
       );
     case "LEAST_TRANSFER":
       return (
@@ -25,7 +38,7 @@ export function scoreCandidate(kind: PlanPreference, metrics: CandidateMetrics) 
         metrics.totalWalkMinutes * 3 +
         metrics.finalArrivalMinutes * 0.5 +
         metrics.safetyBufferCost +
-        (metrics.usesEstimatedStopTimes ? 6 : 0)
+        reliabilityPenalty
       );
   }
 }

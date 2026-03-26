@@ -1591,6 +1591,149 @@ describe("transit worker jobs", () => {
     });
   });
 
+  it("stores rough distance-interpolated stop windows when only authoritative anchor times are available", async () => {
+    fetchScheduleTableMock.mockResolvedValue({
+      rows: [
+        { ROW_SEQ: 0, COLUMN_SEQ: 1, COLUMN_NM: "노선번호" },
+        { ROW_SEQ: 0, COLUMN_SEQ: 2, COLUMN_NM: "Origin" },
+        { ROW_SEQ: 0, COLUMN_SEQ: 3, COLUMN_NM: "Destination" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 1, COLUMN_NM: "212번" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 2, COLUMN_NM: "06:30" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 3, COLUMN_NM: "06:55" },
+      ],
+    });
+
+    const tripCreate = vi.fn().mockImplementation(async ({ data }) => ({ id: data.id }));
+    const stopTimeCreateMany = vi.fn();
+    const derivedStopTimeCreateMany = vi.fn();
+    const runtime = {
+      prisma: {
+        serviceCalendar: {
+          upsert: vi.fn(),
+        },
+        routePatternScheduleSource: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: "schedule-source-rough",
+              scheduleId: "2303",
+              variantKey: "default",
+              routePatternId: "pattern-rough",
+              isActive: true,
+              routePattern: {
+                id: "pattern-rough",
+                directionLabel: "Origin -> Destination",
+                displayName: "212 Origin Destination",
+                waypointText: "Origin -> Destination",
+                viaText: "Origin-Midpoint A-Midpoint B-Destination",
+                route: {
+                  id: "route-rough",
+                  shortName: "212",
+                  displayName: "212",
+                  isActive: true,
+                  createdAt: new Date(),
+                },
+                stopProjections: [],
+                stops: [
+                  {
+                    sequence: 1,
+                    distanceFromStart: 0,
+                    stop: {
+                      id: "stop-a",
+                      displayName: "Origin",
+                      translations: [],
+                    },
+                  },
+                  {
+                    sequence: 2,
+                    distanceFromStart: 1000,
+                    stop: {
+                      id: "stop-b",
+                      displayName: "Midpoint A",
+                      translations: [],
+                    },
+                  },
+                  {
+                    sequence: 3,
+                    distanceFromStart: 2000,
+                    stop: {
+                      id: "stop-c",
+                      displayName: "Midpoint B",
+                      translations: [],
+                    },
+                  },
+                  {
+                    sequence: 4,
+                    distanceFromStart: 3000,
+                    stop: {
+                      id: "stop-d",
+                      displayName: "Destination",
+                      translations: [],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        },
+        trip: {
+          deleteMany: vi.fn(),
+          create: tripCreate,
+        },
+        stopTime: {
+          createMany: stopTimeCreateMany,
+        },
+        derivedStopTime: {
+          createMany: derivedStopTimeCreateMany,
+        },
+      },
+      env: {},
+    } as never;
+
+    const outcome = await runTimetablesXlsxJob(runtime);
+
+    expect(outcome.successCount).toBe(1);
+    expect(stopTimeCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          stopId: "stop-a",
+          arrivalMinutes: 390,
+          timeSource: "OFFICIAL",
+        }),
+        expect.objectContaining({
+          stopId: "stop-d",
+          arrivalMinutes: 415,
+          timeSource: "OFFICIAL",
+        }),
+      ],
+    });
+    expect(derivedStopTimeCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          stopId: "stop-b",
+          arrivalMinutes: 398,
+          timeSource: "DISTANCE_INTERPOLATED",
+          windowStartMinutes: 392,
+          windowEndMinutes: 404,
+          anchorStartSequence: 1,
+          anchorEndSequence: 4,
+        }),
+        expect.objectContaining({
+          stopId: "stop-c",
+          arrivalMinutes: 407,
+          timeSource: "DISTANCE_INTERPOLATED",
+          windowStartMinutes: 401,
+          windowEndMinutes: 413,
+          anchorStartSequence: 1,
+          anchorEndSequence: 4,
+        }),
+      ],
+    });
+    expect(outcome.meta).toMatchObject({
+      trips: 1,
+      derivedStopTimes: 2,
+    });
+  });
+
   it("loads sparse official rows even when the timetable header uses stop abbreviations", async () => {
     fetchScheduleTableMock.mockResolvedValue({
       rows: [

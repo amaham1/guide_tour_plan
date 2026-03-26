@@ -5,6 +5,7 @@ import type {
   CandidateLeg,
   CandidateMetrics,
   CandidateSummary,
+  CandidateTimeReliability,
   CandidateWarning,
   PlannerCandidateDto,
   PlannerEngineInput,
@@ -21,6 +22,7 @@ const MAX_RIDE_ROUNDS = 5;
 const FIRST_BOARD_BUFFER = 5;
 const TRANSFER_BUFFER = 4;
 const ESTIMATED_BUFFER = 6;
+const ROUGH_BUFFER = 12;
 const MAX_SEGMENT_RESULT_DURATION_MINUTES = MAX_SEARCH_WINDOW_MINUTES + 120;
 const SERVICE_UTC_OFFSET_MINUTES = 9 * 60;
 
@@ -72,7 +74,10 @@ type TripStopContext = {
   sequence: number;
   arrivalMinutes: number;
   departureMinutes: number;
-  isEstimated: boolean;
+  timeReliability: CandidateTimeReliability;
+  windowStartMinutes: number | null;
+  windowEndMinutes: number | null;
+  isEstimated?: boolean;
 };
 
 type TripContext = {
@@ -96,17 +101,25 @@ export type PlannerGraphContext = {
   realtimePatternIds: Set<string>;
 };
 
-type DraftLeg = Omit<CandidateLeg, "id" | "startAt" | "endAt" | "durationMinutes"> & {
+type DraftLeg = Omit<
+  CandidateLeg,
+  "id" | "startAt" | "endAt" | "durationMinutes" | "startWindowAt" | "endWindowAt"
+> & {
   startMinutes: number;
   endMinutes: number;
+  startWindowAt?: number | null;
+  endWindowAt?: number | null;
 };
 
 type SegmentOption = {
   signature: string;
   arrivalMinutes: number;
+  arrivalWindowStartMinutes: number | null;
+  arrivalWindowEndMinutes: number | null;
   walkMinutes: number;
   transfers: number;
-  usesEstimatedStopTimes: boolean;
+  worstTimeReliability: CandidateTimeReliability;
+  roughWindowMinutes: number;
   safetyBufferCost: number;
   realtimeEligible: boolean;
   legs: DraftLeg[];
@@ -132,9 +145,12 @@ type RoutingIndex = {
 type StopLabel = {
   stopId: string;
   arrivalMinutes: number;
+  arrivalWindowStartMinutes: number | null;
+  arrivalWindowEndMinutes: number | null;
   walkMinutes: number;
   safetyBufferCost: number;
-  usesEstimatedStopTimes: boolean;
+  worstTimeReliability: CandidateTimeReliability;
+  roughWindowMinutes: number;
   realtimeEligible: boolean;
   signature: string;
   legs: DraftLeg[];
@@ -256,10 +272,120 @@ function createLegId(prefix: string, index: number) {
   return `${prefix}-${index + 1}`;
 }
 
+function getTimeReliabilityRank(reliability: CandidateTimeReliability) {
+  switch (reliability) {
+    case "OFFICIAL":
+      return 0;
+    case "ESTIMATED":
+      return 1;
+    case "ROUGH":
+      return 2;
+  }
+}
+
+function getTimeReliabilityBuffer(reliability: CandidateTimeReliability) {
+  switch (reliability) {
+    case "OFFICIAL":
+      return 0;
+    case "ESTIMATED":
+      return ESTIMATED_BUFFER;
+    case "ROUGH":
+      return ROUGH_BUFFER;
+  }
+}
+
+function maxTimeReliability(
+  ...values: CandidateTimeReliability[]
+): CandidateTimeReliability {
+  return values.reduce((current, candidate) =>
+    getTimeReliabilityRank(candidate) > getTimeReliabilityRank(current) ? candidate : current,
+  );
+}
+
+function getWindowMinutes(startMinutes: number | null, endMinutes: number | null) {
+  if (startMinutes === null || endMinutes === null) {
+    return 0;
+  }
+
+  return Math.max(0, endMinutes - startMinutes);
+}
+
+function shiftWindow(
+  startMinutes: number | null,
+  endMinutes: number | null,
+  deltaMinutes: number,
+) {
+  if (startMinutes === null || endMinutes === null) {
+    return {
+      startMinutes: null,
+      endMinutes: null,
+    };
+  }
+
+  return {
+    startMinutes: startMinutes + deltaMinutes,
+    endMinutes: endMinutes + deltaMinutes,
+  };
+}
+
+function mergeWindows(
+  ...windows: Array<{
+    startMinutes: number | null;
+    endMinutes: number | null;
+  }>
+) {
+  const validWindows = windows.filter(
+    (window) => window.startMinutes !== null && window.endMinutes !== null,
+  ) as Array<{
+    startMinutes: number;
+    endMinutes: number;
+  }>;
+
+  if (validWindows.length === 0) {
+    return {
+      startMinutes: null,
+      endMinutes: null,
+    };
+  }
+
+  return {
+    startMinutes: Math.min(...validWindows.map((window) => window.startMinutes)),
+    endMinutes: Math.max(...validWindows.map((window) => window.endMinutes)),
+  };
+}
+
+function resolveStopTimeReliability(stopTime: TripStopContext): CandidateTimeReliability {
+  if (stopTime.timeReliability) {
+    return stopTime.timeReliability;
+  }
+
+  return stopTime.isEstimated ? "ESTIMATED" : "OFFICIAL";
+}
+
+function getStopTimeWindow(stopTime: TripStopContext) {
+  return {
+    startMinutes: stopTime.windowStartMinutes ?? null,
+    endMinutes: stopTime.windowEndMinutes ?? null,
+  };
+}
+
+function getStopTimeWindowMinutes(stopTime: TripStopContext) {
+  return getWindowMinutes(
+    stopTime.windowStartMinutes ?? null,
+    stopTime.windowEndMinutes ?? null,
+  );
+}
+
 function buildWarnings(metrics: CandidateMetrics): CandidateWarning[] {
   const warnings: CandidateWarning[] = [];
 
-  if (metrics.usesEstimatedStopTimes) {
+  if (metrics.worstTimeReliability === "ROUGH") {
+    warnings.push({
+      code: "ROUGH_STOP_TIMES",
+      message:
+        "일부 정류장 시각은 대략 추정 범위입니다. 실제 교통상황과 분기 운행에 따라 달라질 수 있어 여유 있게 이동해 주세요.",
+    });
+  } else if (metrics.worstTimeReliability === "ESTIMATED") {
     warnings.push({
       code: "ESTIMATED_STOP_TIMES",
       message: "일부 정류장 시각은 공식 시간표가 없어 서비스가 생성한 시각입니다. 여유 시간을 두고 이동해 주세요.",
@@ -320,7 +446,15 @@ function materializeLegs(baseDate: Date, legs: DraftLeg[], prefix: string): Cand
     placeId: leg.placeId,
     fromStopId: leg.fromStopId,
     toStopId: leg.toStopId,
-    estimated: leg.estimated,
+    timeReliability: leg.timeReliability,
+    startWindowAt:
+      leg.startWindowAt !== undefined && leg.startWindowAt !== null
+        ? fromServiceMinutes(baseDate, leg.startWindowAt)
+        : null,
+    endWindowAt:
+      leg.endWindowAt !== undefined && leg.endWindowAt !== null
+        ? fromServiceMinutes(baseDate, leg.endWindowAt)
+        : null,
   }));
 }
 
@@ -340,7 +474,15 @@ function buildSummary(
     transfers: metrics.transfers,
     finalArrivalAt: fromServiceMinutes(baseDate, metrics.finalArrivalMinutes),
     realtimeEligible: metrics.realtimeEligible,
-    usesEstimatedStopTimes: metrics.usesEstimatedStopTimes,
+    worstTimeReliability: metrics.worstTimeReliability,
+    finalArrivalWindowStartAt:
+      typeof metrics.finalArrivalWindowStartMinutes === "number"
+        ? fromServiceMinutes(baseDate, metrics.finalArrivalWindowStartMinutes)
+        : null,
+    finalArrivalWindowEndAt:
+      typeof metrics.finalArrivalWindowEndMinutes === "number"
+        ? fromServiceMinutes(baseDate, metrics.finalArrivalWindowEndMinutes)
+        : null,
     safetyBufferCost: metrics.safetyBufferCost,
   };
 }
@@ -360,15 +502,17 @@ function createVisitLeg(
     fromLabel: placeName,
     toLabel: placeName,
     placeId,
+    timeReliability: "OFFICIAL",
   };
 }
 
-function tripUsesEstimated(trip: TripContext, fromSequence: number, toSequence: number) {
-  return trip.stopTimes.some(
-    (stopTime) =>
-      stopTime.sequence >= fromSequence &&
-      stopTime.sequence <= toSequence &&
-      stopTime.isEstimated,
+function getRideLegTimeReliability(
+  boardStopTime: TripStopContext,
+  alightStopTime: TripStopContext,
+) {
+  return maxTimeReliability(
+    resolveStopTimeReliability(boardStopTime),
+    resolveStopTimeReliability(alightStopTime),
   );
 }
 
@@ -388,6 +532,7 @@ function createAccessWalkLeg(
     fromLabel: fromPlace.displayName,
     toLabel: stopName,
     toStopId,
+    timeReliability: "OFFICIAL",
   };
 }
 
@@ -410,6 +555,7 @@ function createTransferWalkLeg(
     toLabel: toStopName,
     fromStopId,
     toStopId,
+    timeReliability: "OFFICIAL",
   };
 }
 
@@ -429,6 +575,7 @@ function createEgressWalkLeg(
     fromLabel: stopName,
     toLabel: toPlace.displayName,
     fromStopId,
+    timeReliability: "OFFICIAL",
   };
 }
 
@@ -447,6 +594,7 @@ function createWaitLeg(
     toLabel: stopName,
     fromStopId: stopId,
     toStopId: stopId,
+    timeReliability: "OFFICIAL",
   };
 }
 
@@ -454,8 +602,20 @@ function createRideLeg(
   trip: TripContext,
   boardStopTime: TripStopContext,
   alightStopTime: TripStopContext,
-  estimated: boolean,
+  timeReliability: CandidateTimeReliability,
 ): DraftLeg {
+  const boardWindow = getStopTimeWindow(boardStopTime);
+  const shiftedBoardWindow = shiftWindow(
+    boardWindow.startMinutes,
+    boardWindow.endMinutes,
+    alightStopTime.arrivalMinutes - boardStopTime.departureMinutes,
+  );
+  const alightWindow = getStopTimeWindow(alightStopTime);
+  const legEndWindowCandidates = [
+    shiftedBoardWindow.endMinutes,
+    alightWindow.endMinutes,
+  ].filter((value): value is number => value !== null);
+
   return {
     kind: "ride",
     title: `${trip.routeShortName}번 탑승`,
@@ -469,7 +629,15 @@ function createRideLeg(
     tripId: trip.id,
     fromStopId: boardStopTime.stopId,
     toStopId: alightStopTime.stopId,
-    estimated,
+    timeReliability,
+    startWindowAt:
+      timeReliability === "ROUGH"
+        ? boardWindow.startMinutes ?? boardStopTime.departureMinutes
+        : null,
+    endWindowAt:
+      timeReliability === "ROUGH" && legEndWindowCandidates.length > 0
+        ? Math.max(...legEndWindowCandidates)
+        : null,
   };
 }
 
@@ -486,8 +654,15 @@ function compareStopLabels(left: StopLabel, right: StopLabel) {
     return left.safetyBufferCost - right.safetyBufferCost;
   }
 
-  if (left.usesEstimatedStopTimes !== right.usesEstimatedStopTimes) {
-    return Number(left.usesEstimatedStopTimes) - Number(right.usesEstimatedStopTimes);
+  if (left.worstTimeReliability !== right.worstTimeReliability) {
+    return (
+      getTimeReliabilityRank(left.worstTimeReliability) -
+      getTimeReliabilityRank(right.worstTimeReliability)
+    );
+  }
+
+  if (left.roughWindowMinutes !== right.roughWindowMinutes) {
+    return left.roughWindowMinutes - right.roughWindowMinutes;
   }
 
   if (left.realtimeEligible !== right.realtimeEligible) {
@@ -514,8 +689,15 @@ function compareSegmentOptions(left: SegmentOption, right: SegmentOption) {
     return left.safetyBufferCost - right.safetyBufferCost;
   }
 
-  if (left.usesEstimatedStopTimes !== right.usesEstimatedStopTimes) {
-    return Number(left.usesEstimatedStopTimes) - Number(right.usesEstimatedStopTimes);
+  if (left.worstTimeReliability !== right.worstTimeReliability) {
+    return (
+      getTimeReliabilityRank(left.worstTimeReliability) -
+      getTimeReliabilityRank(right.worstTimeReliability)
+    );
+  }
+
+  if (left.roughWindowMinutes !== right.roughWindowMinutes) {
+    return left.roughWindowMinutes - right.roughWindowMinutes;
   }
 
   if (left.realtimeEligible !== right.realtimeEligible) {
@@ -528,15 +710,16 @@ function compareSegmentOptions(left: SegmentOption, right: SegmentOption) {
 function dominatesSegmentOption(left: SegmentOption, right: SegmentOption) {
   const leftRealtimePenalty = left.realtimeEligible ? 0 : 1;
   const rightRealtimePenalty = right.realtimeEligible ? 0 : 1;
-  const leftEstimatedPenalty = left.usesEstimatedStopTimes ? 1 : 0;
-  const rightEstimatedPenalty = right.usesEstimatedStopTimes ? 1 : 0;
+  const leftReliabilityPenalty = getTimeReliabilityRank(left.worstTimeReliability);
+  const rightReliabilityPenalty = getTimeReliabilityRank(right.worstTimeReliability);
 
   const noWorse =
     left.arrivalMinutes <= right.arrivalMinutes &&
     left.walkMinutes <= right.walkMinutes &&
     left.transfers <= right.transfers &&
     left.safetyBufferCost <= right.safetyBufferCost &&
-    leftEstimatedPenalty <= rightEstimatedPenalty &&
+    leftReliabilityPenalty <= rightReliabilityPenalty &&
+    left.roughWindowMinutes <= right.roughWindowMinutes &&
     leftRealtimePenalty <= rightRealtimePenalty;
 
   const strictlyBetter =
@@ -544,7 +727,8 @@ function dominatesSegmentOption(left: SegmentOption, right: SegmentOption) {
     left.walkMinutes < right.walkMinutes ||
     left.transfers < right.transfers ||
     left.safetyBufferCost < right.safetyBufferCost ||
-    leftEstimatedPenalty < rightEstimatedPenalty ||
+    leftReliabilityPenalty < rightReliabilityPenalty ||
+    left.roughWindowMinutes < right.roughWindowMinutes ||
     leftRealtimePenalty < rightRealtimePenalty;
 
   return noWorse && strictlyBetter;
@@ -567,8 +751,15 @@ function comparePartialItineraries(left: PartialItinerary, right: PartialItinera
     return left.metrics.safetyBufferCost - right.metrics.safetyBufferCost;
   }
 
-  if (left.metrics.usesEstimatedStopTimes !== right.metrics.usesEstimatedStopTimes) {
-    return Number(left.metrics.usesEstimatedStopTimes) - Number(right.metrics.usesEstimatedStopTimes);
+  if (left.metrics.worstTimeReliability !== right.metrics.worstTimeReliability) {
+    return (
+      getTimeReliabilityRank(left.metrics.worstTimeReliability) -
+      getTimeReliabilityRank(right.metrics.worstTimeReliability)
+    );
+  }
+
+  if (left.metrics.roughWindowMinutes !== right.metrics.roughWindowMinutes) {
+    return left.metrics.roughWindowMinutes - right.metrics.roughWindowMinutes;
   }
 
   if (left.metrics.realtimeEligible !== right.metrics.realtimeEligible) {
@@ -581,15 +772,16 @@ function comparePartialItineraries(left: PartialItinerary, right: PartialItinera
 function dominatesPartialItinerary(left: PartialItinerary, right: PartialItinerary) {
   const leftRealtimePenalty = left.metrics.realtimeEligible ? 0 : 1;
   const rightRealtimePenalty = right.metrics.realtimeEligible ? 0 : 1;
-  const leftEstimatedPenalty = left.metrics.usesEstimatedStopTimes ? 1 : 0;
-  const rightEstimatedPenalty = right.metrics.usesEstimatedStopTimes ? 1 : 0;
+  const leftReliabilityPenalty = getTimeReliabilityRank(left.metrics.worstTimeReliability);
+  const rightReliabilityPenalty = getTimeReliabilityRank(right.metrics.worstTimeReliability);
 
   const noWorse =
     left.currentMinutes <= right.currentMinutes &&
     left.metrics.totalWalkMinutes <= right.metrics.totalWalkMinutes &&
     left.metrics.transfers <= right.metrics.transfers &&
     left.metrics.safetyBufferCost <= right.metrics.safetyBufferCost &&
-    leftEstimatedPenalty <= rightEstimatedPenalty &&
+    leftReliabilityPenalty <= rightReliabilityPenalty &&
+    left.metrics.roughWindowMinutes <= right.metrics.roughWindowMinutes &&
     leftRealtimePenalty <= rightRealtimePenalty;
 
   const strictlyBetter =
@@ -597,7 +789,8 @@ function dominatesPartialItinerary(left: PartialItinerary, right: PartialItinera
     left.metrics.totalWalkMinutes < right.metrics.totalWalkMinutes ||
     left.metrics.transfers < right.metrics.transfers ||
     left.metrics.safetyBufferCost < right.metrics.safetyBufferCost ||
-    leftEstimatedPenalty < rightEstimatedPenalty ||
+    leftReliabilityPenalty < rightReliabilityPenalty ||
+    left.metrics.roughWindowMinutes < right.metrics.roughWindowMinutes ||
     leftRealtimePenalty < rightRealtimePenalty;
 
   return noWorse && strictlyBetter;
@@ -827,12 +1020,20 @@ function relaxTransferLabels(
       }
 
       const toStop = context.stops.get(transfer.toStopId);
+      const shiftedWindow = shiftWindow(
+        currentLabel.arrivalWindowStartMinutes,
+        currentLabel.arrivalWindowEndMinutes,
+        transfer.durationMinutes,
+      );
       const candidate: StopLabel = {
         stopId: transfer.toStopId,
         arrivalMinutes: nextArrivalMinutes,
+        arrivalWindowStartMinutes: shiftedWindow.startMinutes,
+        arrivalWindowEndMinutes: shiftedWindow.endMinutes,
         walkMinutes: currentLabel.walkMinutes + transfer.durationMinutes,
         safetyBufferCost: currentLabel.safetyBufferCost,
-        usesEstimatedStopTimes: currentLabel.usesEstimatedStopTimes,
+        worstTimeReliability: currentLabel.worstTimeReliability,
+        roughWindowMinutes: currentLabel.roughWindowMinutes,
         realtimeEligible: currentLabel.realtimeEligible,
         signature: `${currentLabel.signature}|walk:${current.stopId}:${transfer.toStopId}`,
         legs: [
@@ -931,10 +1132,24 @@ function scanRoute(
       continue;
     }
 
-    const estimated = tripUsesEstimated(
-      activeBoard.trip,
-      activeBoard.boardStopTime.sequence,
-      alightStopTime.sequence,
+    const rideTimeReliability = getRideLegTimeReliability(
+      activeBoard.boardStopTime,
+      alightStopTime,
+    );
+    const inheritedArrivalWindow = shiftWindow(
+      activeBoard.previousLabel.arrivalWindowStartMinutes,
+      activeBoard.previousLabel.arrivalWindowEndMinutes,
+      alightStopTime.arrivalMinutes - activeBoard.previousLabel.arrivalMinutes,
+    );
+    const boardArrivalWindow = shiftWindow(
+      activeBoard.boardStopTime.windowStartMinutes,
+      activeBoard.boardStopTime.windowEndMinutes,
+      alightStopTime.arrivalMinutes - activeBoard.boardStopTime.departureMinutes,
+    );
+    const mergedArrivalWindow = mergeWindows(
+      inheritedArrivalWindow,
+      boardArrivalWindow,
+      getStopTimeWindow(alightStopTime),
     );
 
     const nextLegs = [...activeBoard.previousLabel.legs];
@@ -949,19 +1164,39 @@ function scanRoute(
       );
     }
     nextLegs.push(
-      createRideLeg(activeBoard.trip, activeBoard.boardStopTime, alightStopTime, estimated),
+      createRideLeg(
+        activeBoard.trip,
+        activeBoard.boardStopTime,
+        alightStopTime,
+        rideTimeReliability,
+      ),
     );
 
     const candidate: StopLabel = {
       stopId: alightStopTime.stopId,
       arrivalMinutes: alightStopTime.arrivalMinutes,
+      arrivalWindowStartMinutes: mergedArrivalWindow.startMinutes,
+      arrivalWindowEndMinutes: mergedArrivalWindow.endMinutes,
       walkMinutes: activeBoard.previousLabel.walkMinutes,
       safetyBufferCost:
         activeBoard.previousLabel.safetyBufferCost +
         (round === 1 ? FIRST_BOARD_BUFFER : TRANSFER_BUFFER) +
-        (estimated ? ESTIMATED_BUFFER : 0),
-      usesEstimatedStopTimes: activeBoard.previousLabel.usesEstimatedStopTimes || estimated,
-      realtimeEligible: true,
+        getTimeReliabilityBuffer(rideTimeReliability),
+      worstTimeReliability: maxTimeReliability(
+        activeBoard.previousLabel.worstTimeReliability,
+        rideTimeReliability,
+      ),
+      roughWindowMinutes: Math.max(
+        activeBoard.previousLabel.roughWindowMinutes,
+        getWindowMinutes(
+          mergedArrivalWindow.startMinutes,
+          mergedArrivalWindow.endMinutes,
+        ),
+        getStopTimeWindowMinutes(activeBoard.boardStopTime),
+        getStopTimeWindowMinutes(alightStopTime),
+      ),
+      realtimeEligible:
+        activeBoard.previousLabel.realtimeEligible && rideTimeReliability !== "ROUGH",
       signature: `${activeBoard.previousLabel.signature}|ride:${activeBoard.trip.id}:${activeBoard.boardStopTime.stopId}:${alightStopTime.stopId}`,
       legs: nextLegs,
     };
@@ -995,12 +1230,23 @@ function collectSegmentOptions(
     }
 
     const fromStop = context.stops.get(egress.fromStopId);
+    const shiftedWindow = shiftWindow(
+      label.arrivalWindowStartMinutes,
+      label.arrivalWindowEndMinutes,
+      egress.durationMinutes,
+    );
     const option: SegmentOption = {
       signature: `${label.signature}|egress:${egress.fromStopId}:${toPlace.id}`,
       arrivalMinutes,
+      arrivalWindowStartMinutes: shiftedWindow.startMinutes,
+      arrivalWindowEndMinutes: shiftedWindow.endMinutes,
       walkMinutes: label.walkMinutes + egress.durationMinutes,
       transfers: Math.max(0, ridesUsed - 1),
-      usesEstimatedStopTimes: label.usesEstimatedStopTimes,
+      worstTimeReliability: label.worstTimeReliability,
+      roughWindowMinutes: Math.max(
+        label.roughWindowMinutes,
+        getWindowMinutes(shiftedWindow.startMinutes, shiftedWindow.endMinutes),
+      ),
       safetyBufferCost: label.safetyBufferCost,
       realtimeEligible: label.realtimeEligible,
       legs: [
@@ -1064,9 +1310,12 @@ function findSegmentOptions(
     const candidate: StopLabel = {
       stopId: access.toStopId,
       arrivalMinutes: earliestDepartureMinutes + access.durationMinutes,
+      arrivalWindowStartMinutes: null,
+      arrivalWindowEndMinutes: null,
       walkMinutes: access.durationMinutes,
       safetyBufferCost: 0,
-      usesEstimatedStopTimes: false,
+      worstTimeReliability: "OFFICIAL",
+      roughWindowMinutes: 0,
       realtimeEligible: true,
       signature: `access:${currentPlaceId}:${access.toStopId}`,
       legs: [
@@ -1139,7 +1388,10 @@ function buildItineraries(input: PlannerEngineInput, context: PlannerGraphContex
       metrics: {
         totalWalkMinutes: 0,
         transfers: 0,
-        usesEstimatedStopTimes: false,
+        worstTimeReliability: "OFFICIAL",
+        finalArrivalWindowStartMinutes: null,
+        finalArrivalWindowEndMinutes: null,
+        roughWindowMinutes: 0,
         safetyBufferCost: 0,
         realtimeEligible: true,
       },
@@ -1167,7 +1419,17 @@ function buildItineraries(input: PlannerEngineInput, context: PlannerGraphContex
           ? `${partial.signature}|visit:${currentPlace.id}`
           : `visit:${currentPlace.id}`,
         currentMinutes: visitLeg.endMinutes,
-        metrics: partial.metrics,
+        metrics: {
+          ...partial.metrics,
+          finalArrivalWindowStartMinutes:
+            partial.metrics.finalArrivalWindowStartMinutes !== null
+              ? partial.metrics.finalArrivalWindowStartMinutes + currentPlaceInput.dwellMinutes
+              : null,
+          finalArrivalWindowEndMinutes:
+            partial.metrics.finalArrivalWindowEndMinutes !== null
+              ? partial.metrics.finalArrivalWindowEndMinutes + currentPlaceInput.dwellMinutes
+              : null,
+        },
         legs: [...partial.legs, visitLeg],
       };
 
@@ -1191,17 +1453,39 @@ function buildItineraries(input: PlannerEngineInput, context: PlannerGraphContex
       }
 
       for (const option of segmentOptions.slice(0, SEGMENT_OPTIONS_PER_PARTIAL)) {
+        const inheritedArrivalWindow = shiftWindow(
+          visitedPartial.metrics.finalArrivalWindowStartMinutes,
+          visitedPartial.metrics.finalArrivalWindowEndMinutes,
+          option.arrivalMinutes - visitedPartial.currentMinutes,
+        );
+        const mergedArrivalWindow = mergeWindows(inheritedArrivalWindow, {
+          startMinutes: option.arrivalWindowStartMinutes,
+          endMinutes: option.arrivalWindowEndMinutes,
+        });
+
         nextFrontier.push({
           signature: `${visitedPartial.signature}|${option.signature}`,
           currentMinutes: option.arrivalMinutes,
           metrics: {
             totalWalkMinutes: visitedPartial.metrics.totalWalkMinutes + option.walkMinutes,
             transfers: visitedPartial.metrics.transfers + option.transfers,
-            usesEstimatedStopTimes:
-              visitedPartial.metrics.usesEstimatedStopTimes || option.usesEstimatedStopTimes,
+            worstTimeReliability: maxTimeReliability(
+              visitedPartial.metrics.worstTimeReliability,
+              option.worstTimeReliability,
+            ),
+            finalArrivalWindowStartMinutes: mergedArrivalWindow.startMinutes,
+            finalArrivalWindowEndMinutes: mergedArrivalWindow.endMinutes,
+            roughWindowMinutes: Math.max(
+              visitedPartial.metrics.roughWindowMinutes,
+              option.roughWindowMinutes,
+              getWindowMinutes(
+                mergedArrivalWindow.startMinutes,
+                mergedArrivalWindow.endMinutes,
+              ),
+            ),
             safetyBufferCost: visitedPartial.metrics.safetyBufferCost + option.safetyBufferCost,
             realtimeEligible:
-              visitedPartial.metrics.realtimeEligible || option.realtimeEligible,
+              visitedPartial.metrics.realtimeEligible && option.realtimeEligible,
           },
           legs: [...visitedPartial.legs, ...option.legs],
         });

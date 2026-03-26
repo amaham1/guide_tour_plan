@@ -24,6 +24,7 @@ import {
   planRequestSchema,
   searchRequestSchema,
   type CandidateLeg,
+  type CandidateTimeReliability,
   type CandidateSummary,
   type CandidateWarning,
   type ExecutionStatusDto,
@@ -33,6 +34,7 @@ import {
   type PlannerResultDto,
   type PlannerStoredPlaceInput,
   type SearchResultDto,
+  type TimeReliabilityMode,
 } from "@/features/planner/types";
 
 type PlannerAnchor = {
@@ -81,6 +83,57 @@ function parseJson<T>(value: Prisma.JsonValue): T {
   return value as T;
 }
 
+function isTimeReliabilityMode(value: unknown): value is TimeReliabilityMode {
+  return (
+    value === "OFFICIAL_ONLY" ||
+    value === "INCLUDE_ESTIMATED" ||
+    value === "ALLOW_ROUGH"
+  );
+}
+
+function isCandidateTimeReliability(
+  value: unknown,
+): value is CandidateTimeReliability {
+  return value === "OFFICIAL" || value === "ESTIMATED" || value === "ROUGH";
+}
+
+function normalizeCandidateLeg(leg: Record<string, unknown>): CandidateLeg {
+  const timeReliability = isCandidateTimeReliability(leg.timeReliability)
+    ? leg.timeReliability
+    : leg.estimated
+      ? "ESTIMATED"
+      : "OFFICIAL";
+
+  return {
+    ...(leg as CandidateLeg),
+    timeReliability,
+    startWindowAt:
+      typeof leg.startWindowAt === "string" ? leg.startWindowAt : null,
+    endWindowAt: typeof leg.endWindowAt === "string" ? leg.endWindowAt : null,
+  };
+}
+
+function normalizeCandidateSummary(summary: Record<string, unknown>): CandidateSummary {
+  const worstTimeReliability = isCandidateTimeReliability(summary.worstTimeReliability)
+    ? summary.worstTimeReliability
+    : summary.usesEstimatedStopTimes
+      ? "ESTIMATED"
+      : "OFFICIAL";
+
+  return {
+    ...(summary as CandidateSummary),
+    worstTimeReliability,
+    finalArrivalWindowStartAt:
+      typeof summary.finalArrivalWindowStartAt === "string"
+        ? summary.finalArrivalWindowStartAt
+        : null,
+    finalArrivalWindowEndAt:
+      typeof summary.finalArrivalWindowEndAt === "string"
+        ? summary.finalArrivalWindowEndAt
+        : null,
+  };
+}
+
 function plannerFallbackMessage() {
   return "선택한 순서로 오늘 연결 가능한 버스를 찾지 못했습니다. 시작 시각이나 장소 순서를 바꿔 다시 시도해 주세요.";
 }
@@ -103,12 +156,17 @@ function toPlannerCandidateDto(candidate: {
   legs: Prisma.JsonValue;
   warnings: Prisma.JsonValue | null;
 }): PlannerCandidateDto {
+  const summary = normalizeCandidateSummary(
+    parseJson<Record<string, unknown>>(candidate.summary),
+  );
+  const legs = parseJson<Record<string, unknown>[]>(candidate.legs).map(normalizeCandidateLeg);
+
   return {
     id: candidate.id,
     kind: candidate.kind,
     score: candidate.score,
-    summary: parseJson<CandidateSummary>(candidate.summary),
-    legs: parseJson<CandidateLeg[]>(candidate.legs),
+    summary,
+    legs,
     warnings: candidate.warnings
       ? parseJson<CandidateWarning[]>(candidate.warnings)
       : [],
@@ -229,14 +287,65 @@ function buildDerivedRoutingKey(
 }
 
 function plannerFallbackMessageForStatus(options?: {
-  includeGeneratedTimes?: boolean;
-  generatedAlternativeAvailable?: boolean;
+  timeReliabilityMode?: TimeReliabilityMode;
+  nextSuggestedTimeReliabilityMode?: TimeReliabilityMode;
 }) {
-  if (options?.generatedAlternativeAvailable && !options.includeGeneratedTimes) {
-    return "공식 시간표만으로는 연결 가능한 경로를 찾지 못했습니다. `생성 시각 포함`을 켜면 더 많은 경로를 볼 수 있습니다.";
+  if (options?.nextSuggestedTimeReliabilityMode === "INCLUDE_ESTIMATED") {
+    return "공식 시간표만으로는 연결 가능한 경로를 찾지 못했습니다. `추정 포함`으로 다시 계산하면 더 많은 경로를 볼 수 있습니다.";
+  }
+
+  if (options?.nextSuggestedTimeReliabilityMode === "ALLOW_ROUGH") {
+    return options.timeReliabilityMode === "OFFICIAL_ONLY"
+      ? "공식과 추정 시각만으로는 연결 가능한 경로를 찾지 못했습니다. `대략까지 허용`으로 다시 계산하면 대략 범위 기반 경로를 볼 수 있습니다."
+      : "`대략까지 허용`으로 다시 계산하면 대략 범위 기반 경로를 볼 수 있습니다. 대략 시각은 fallback-only이며 실제 교통상황과 분기 운행에 따라 달라질 수 있습니다.";
   }
 
   return "선택한 순서로 오늘 연결 가능한 버스를 찾지 못했습니다. 시작 시각이나 장소 순서를 바꿔 다시 시도해 주세요.";
+}
+
+function getDerivedGraphMode(mode: TimeReliabilityMode) {
+  switch (mode) {
+    case "OFFICIAL_ONLY":
+      return "OFFICIAL_ONLY" as const;
+    case "INCLUDE_ESTIMATED":
+      return "INCLUDE_ESTIMATED" as const;
+    case "ALLOW_ROUGH":
+      return "ALLOW_ROUGH" as const;
+  }
+}
+
+function nextHigherTimeReliabilityMode(mode: TimeReliabilityMode) {
+  switch (mode) {
+    case "OFFICIAL_ONLY":
+      return "INCLUDE_ESTIMATED" as const;
+    case "INCLUDE_ESTIMATED":
+      return "ALLOW_ROUGH" as const;
+    case "ALLOW_ROUGH":
+      return null;
+  }
+}
+
+function statusFromNextSuggestedMode(nextSuggestedMode: TimeReliabilityMode | null) {
+  switch (nextSuggestedMode) {
+    case "INCLUDE_ESTIMATED":
+      return "NO_ROUTE_ESTIMATED_AVAILABLE";
+    case "ALLOW_ROUGH":
+      return "NO_ROUTE_ROUGH_AVAILABLE";
+    default:
+      return "NO_ROUTE";
+  }
+}
+
+function nextSuggestedModeFromStatus(status: string): TimeReliabilityMode | undefined {
+  if (status === "NO_ROUTE_GENERATED_AVAILABLE" || status === "NO_ROUTE_ESTIMATED_AVAILABLE") {
+    return "INCLUDE_ESTIMATED";
+  }
+
+  if (status === "NO_ROUTE_ROUGH_AVAILABLE") {
+    return "ALLOW_ROUGH";
+  }
+
+  return undefined;
 }
 
 function isUsableSparseOfficialTrip(
@@ -463,10 +572,21 @@ async function buildDynamicPlaceLinks(
   };
 }
 
+function getAllowedDerivedTimeSources(mode: TimeReliabilityMode) {
+  switch (mode) {
+    case "OFFICIAL_ONLY":
+      return new Set<string>();
+    case "INCLUDE_ESTIMATED":
+      return new Set(["OFFICIAL_ANCHOR_INTERPOLATED"]);
+    case "ALLOW_ROUGH":
+      return new Set(["OFFICIAL_ANCHOR_INTERPOLATED", "DISTANCE_INTERPOLATED"]);
+  }
+}
+
 async function loadPlannerGraph(
   prisma: PrismaClient,
   anchors: PlannerAnchor[],
-  includeGeneratedTimes: boolean,
+  timeReliabilityMode: TimeReliabilityMode,
 ): Promise<PlannerGraphContext> {
   const [stops, stopTransfers, patterns] = await Promise.all([
     prisma.stop.findMany(),
@@ -578,6 +698,7 @@ async function loadPlannerGraph(
   const stopTransfersByOrigin: PlannerGraphContext["stopTransfersByOrigin"] =
     new Map();
   const validStopIds = new Set(stopMap.keys());
+  const allowedDerivedTimeSources = getAllowedDerivedTimeSources(timeReliabilityMode);
 
   for (const link of stopTransfers) {
     if (
@@ -618,7 +739,9 @@ async function loadPlannerGraph(
           sequence: number;
           arrivalMinutes: number;
           departureMinutes: number;
-          isEstimated: boolean;
+          timeReliability: CandidateTimeReliability;
+          windowStartMinutes: number | null;
+          windowEndMinutes: number | null;
         }
       >();
 
@@ -629,16 +752,27 @@ async function loadPlannerGraph(
           sequence: stopTime.sequence,
           arrivalMinutes: stopTime.arrivalMinutes,
           departureMinutes: stopTime.departureMinutes,
-          isEstimated: false,
+          timeReliability: "OFFICIAL",
+          windowStartMinutes: null,
+          windowEndMinutes: null,
         });
       }
 
       if (
-        includeGeneratedTimes &&
+        allowedDerivedTimeSources.size > 0 &&
         trip.derivedStopTimes.length > 0 &&
-        isUsableGeneratedStopTimes(pattern.stops, trip.derivedStopTimes)
+        isUsableGeneratedStopTimes(
+          pattern.stops,
+          trip.derivedStopTimes.filter((stopTime) =>
+            allowedDerivedTimeSources.has(stopTime.timeSource),
+          ),
+        )
       ) {
         for (const stopTime of trip.derivedStopTimes) {
+          if (!allowedDerivedTimeSources.has(stopTime.timeSource)) {
+            continue;
+          }
+
           if (mergedStopTimes.has(stopTime.sequence)) {
             continue;
           }
@@ -649,7 +783,10 @@ async function loadPlannerGraph(
             sequence: stopTime.sequence,
             arrivalMinutes: stopTime.arrivalMinutes,
             departureMinutes: stopTime.departureMinutes,
-            isEstimated: true,
+            timeReliability:
+              stopTime.timeSource === "DISTANCE_INTERPOLATED" ? "ROUGH" : "ESTIMATED",
+            windowStartMinutes: stopTime.windowStartMinutes,
+            windowEndMinutes: stopTime.windowEndMinutes,
           });
         }
       }
@@ -768,10 +905,15 @@ async function resolvePlannerAnchors(
 
   return {
     anchors,
-    buildEngineInput(startAt: string, includeGeneratedTimes: boolean) {
+    buildEngineInput(
+      startAt: string,
+      timeReliabilityMode: TimeReliabilityMode,
+      includeGeneratedTimes: boolean,
+    ) {
       return {
         startAt,
         includeGeneratedTimes,
+        timeReliabilityMode,
         places: anchors.map((anchor) => ({
           placeId: anchor.id,
           dwellMinutes: anchor.dwellMinutes,
@@ -955,6 +1097,7 @@ export async function createPlannerResult(rawInput: unknown): Promise<PlannerRes
       language: input.language,
       startAt: new Date(input.startAt),
       includeGeneratedTimes: input.includeGeneratedTimes,
+      timeReliabilityMode: input.timeReliabilityMode,
       preference: input.preference,
       status: "READY",
       places: {
@@ -974,10 +1117,32 @@ export async function createPlannerResult(rawInput: unknown): Promise<PlannerRes
     },
   });
 
-  const graph = await loadPlannerGraph(db, anchors, input.includeGeneratedTimes);
-  const engineInput = buildEngineInput(input.startAt, input.includeGeneratedTimes);
-  const candidates = buildPlannerCandidates(planQuery.id, engineInput, graph);
-  let generatedAlternativeAvailable = false;
+  const runCandidatesForMode = async (mode: TimeReliabilityMode) => {
+    const graph = await loadPlannerGraph(db, anchors, mode);
+    const engineInput = buildEngineInput(
+      input.startAt,
+      mode,
+      mode !== "OFFICIAL_ONLY",
+    );
+
+    return {
+      graph,
+      candidates: buildPlannerCandidates(planQuery.id, engineInput, graph),
+    };
+  };
+
+  const initialMode =
+    input.timeReliabilityMode === "ALLOW_ROUGH"
+      ? "INCLUDE_ESTIMATED"
+      : input.timeReliabilityMode;
+  let { graph, candidates } = await runCandidatesForMode(initialMode);
+  let nextSuggestedTimeReliabilityMode: TimeReliabilityMode | null = null;
+
+  if (candidates.length === 0 && input.timeReliabilityMode === "ALLOW_ROUGH") {
+    const rerun = await runCandidatesForMode("ALLOW_ROUGH");
+    graph = rerun.graph;
+    candidates = rerun.candidates;
+  }
 
   for (const candidate of candidates) {
     const openingWarnings = buildOpeningHoursWarnings(graph.places, candidate.legs);
@@ -995,14 +1160,22 @@ export async function createPlannerResult(rawInput: unknown): Promise<PlannerRes
     });
   }
 
-  if (candidates.length === 0 && !input.includeGeneratedTimes) {
-    const previewGraph = await loadPlannerGraph(db, anchors, true);
-    const previewCandidates = buildPlannerCandidates(
-      planQuery.id,
-      buildEngineInput(input.startAt, true),
-      previewGraph,
-    );
-    generatedAlternativeAvailable = previewCandidates.length > 0;
+  if (candidates.length === 0) {
+    const nextMode = nextHigherTimeReliabilityMode(input.timeReliabilityMode);
+    if (nextMode) {
+      const preview = await runCandidatesForMode(nextMode);
+      if (preview.candidates.length > 0) {
+        nextSuggestedTimeReliabilityMode = nextMode;
+      } else {
+        const fallbackMode = nextHigherTimeReliabilityMode(nextMode);
+        if (fallbackMode) {
+          const fallbackPreview = await runCandidatesForMode(fallbackMode);
+          if (fallbackPreview.candidates.length > 0) {
+            nextSuggestedTimeReliabilityMode = fallbackMode;
+          }
+        }
+      }
+    }
   }
 
   await db.planQuery.update({
@@ -1011,9 +1184,7 @@ export async function createPlannerResult(rawInput: unknown): Promise<PlannerRes
       status:
         candidates.length > 0
           ? "COMPUTED"
-          : generatedAlternativeAvailable
-            ? "NO_ROUTE_GENERATED_AVAILABLE"
-            : "NO_ROUTE",
+          : statusFromNextSuggestedMode(nextSuggestedTimeReliabilityMode),
     },
   });
 
@@ -1048,10 +1219,19 @@ export async function getPlannerResult(planId: string): Promise<PlannerResultDto
     throw new ResourceNotFoundError("플랜을 찾지 못했습니다.");
   }
 
+  const timeReliabilityMode = isTimeReliabilityMode(planQuery.timeReliabilityMode)
+    ? planQuery.timeReliabilityMode
+    : planQuery.includeGeneratedTimes
+      ? "INCLUDE_ESTIMATED"
+      : "OFFICIAL_ONLY";
+  const nextSuggestedTimeReliabilityMode = nextSuggestedModeFromStatus(planQuery.status);
+
   return {
     planId: planQuery.id,
     startAt: planQuery.startAt.toISOString(),
     includeGeneratedTimes: planQuery.includeGeneratedTimes,
+    timeReliabilityMode,
+    nextSuggestedTimeReliabilityMode,
     preference: planQuery.preference ?? undefined,
     places: planQuery.places.map((place) => ({
       placeId: buildPlanQueryPlaceId(place),
@@ -1064,9 +1244,8 @@ export async function getPlannerResult(planId: string): Promise<PlannerResultDto
     fallbackMessage:
       planQuery.candidates.length === 0
         ? plannerFallbackMessageForStatus({
-            includeGeneratedTimes: planQuery.includeGeneratedTimes,
-            generatedAlternativeAvailable:
-              planQuery.status === "NO_ROUTE_GENERATED_AVAILABLE",
+            timeReliabilityMode,
+            nextSuggestedTimeReliabilityMode,
           })
         : undefined,
   };
@@ -1086,8 +1265,8 @@ export async function createExecutionSession(rawInput: unknown) {
   }
 
   const snapshot = {
-    summary: parseJson<CandidateSummary>(candidate.summary),
-    legs: parseJson<CandidateLeg[]>(candidate.legs),
+    summary: normalizeCandidateSummary(parseJson<Record<string, unknown>>(candidate.summary)),
+    legs: parseJson<Record<string, unknown>[]>(candidate.legs).map(normalizeCandidateLeg),
   };
 
   const session = await db.executionSession.create({
@@ -1127,6 +1306,16 @@ async function resolveRealtimeSignal(
       replacementSuggested: false,
       notice: "현재는 시간표 기준 안내입니다.",
       reason: "NO_ACTIVE_RIDE",
+    };
+  }
+
+  if (rideLeg.timeReliability === "ROUGH") {
+    return {
+      applied: false,
+      delayMinutes: 0,
+      replacementSuggested: false,
+      notice: "대략 시각 구간은 실시간 보정을 적용하지 않고 시간표 범위 기준으로 안내합니다.",
+      reason: "ROUGH_STOP_TIMES",
     };
   }
 
@@ -1236,10 +1425,14 @@ export async function getExecutionSessionStatus(
     throw new ResourceNotFoundError("실행 세션을 찾지 못했습니다.");
   }
 
-  const snapshot = parseJson<{
-    summary: CandidateSummary;
-    legs: CandidateLeg[];
+  const rawSnapshot = parseJson<{
+    summary: Record<string, unknown>;
+    legs: Record<string, unknown>[];
   }>(session.snapshot);
+  const snapshot = {
+    summary: normalizeCandidateSummary(rawSnapshot.summary),
+    legs: rawSnapshot.legs.map(normalizeCandidateLeg),
+  };
 
   const now = new Date();
   const status = buildExecutionStatus(session.id, snapshot, {}, now);

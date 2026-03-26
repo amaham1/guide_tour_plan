@@ -33,6 +33,7 @@ describe("opening hours warnings", () => {
           endAt: "2026-03-23T02:00:00.000Z",
           durationMinutes: 60,
           placeId: "place-1",
+          timeReliability: "OFFICIAL",
         },
       ],
     );
@@ -51,6 +52,7 @@ describe("realtime delay estimation", () => {
         startAt: "2026-03-23T10:00:00.000Z",
         endAt: "2026-03-23T10:30:00.000Z",
         durationMinutes: 30,
+        timeReliability: "OFFICIAL",
       },
       {
         latitude: 33.5,

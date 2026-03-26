@@ -3,7 +3,10 @@
 import { startTransition, useDeferredValue, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Search, X } from "lucide-react";
-import type { SearchResultDto } from "@/features/planner/types";
+import type {
+  SearchResultDto,
+  TimeReliabilityMode,
+} from "@/features/planner/types";
 import { cn } from "@/lib/utils";
 
 type SelectedPlace = SearchResultDto & {
@@ -14,6 +17,28 @@ type PlannerFormProps = {
   catalogReady: boolean;
   setupMessage: string | null;
 };
+
+const timeReliabilityModeOptions: Array<{
+  value: TimeReliabilityMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "OFFICIAL_ONLY",
+    label: "공식만",
+    description: "공식 시간표가 있는 정류장만 사용합니다.",
+  },
+  {
+    value: "INCLUDE_ESTIMATED",
+    label: "추정 포함",
+    description: "공식 anchor 사이의 추정 시각까지 함께 사용합니다.",
+  },
+  {
+    value: "ALLOW_ROUGH",
+    label: "대략까지 허용",
+    description: "후보가 없을 때만 대략 범위 기반 시각을 fallback으로 허용합니다.",
+  },
+];
 
 function toLocalDateTimeValue(date: Date) {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
@@ -54,7 +79,8 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [loadingResults, setLoadingResults] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [includeGeneratedTimes, setIncludeGeneratedTimes] = useState(false);
+  const [timeReliabilityMode, setTimeReliabilityMode] =
+    useState<TimeReliabilityMode>("INCLUDE_ESTIMATED");
   const [startAt, setStartAt] = useState(() => {
     const initial = new Date();
     initial.setMinutes(Math.ceil(initial.getMinutes() / 10) * 10, 0, 0);
@@ -177,7 +203,7 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
             body: JSON.stringify({
               language: "ko",
               startAt: new Date(startAt).toISOString(),
-              includeGeneratedTimes,
+              timeReliabilityMode,
               places: selectedPlaces.map(buildPlanPlaceInput),
             }),
           });
@@ -236,18 +262,27 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
           />
         </label>
 
-        <label className="mt-5 flex items-start gap-3 rounded-2xl border border-ink/10 bg-white/70 px-4 py-3 text-sm text-ink/80">
-          <input
-            type="checkbox"
-            checked={includeGeneratedTimes}
-            onChange={(event) => setIncludeGeneratedTimes(event.target.checked)}
-            className="mt-0.5 size-4 rounded border-ink/20 text-lagoon focus:ring-lagoon/30"
-          />
-          <span>
-            <span className="block font-medium text-ink">생성 시각 포함</span>
-            <span className="mt-1 block text-ink/60">
-              공식 시간표가 비어 있는 중간 정류장은 서비스가 생성한 시각을 함께 사용합니다.
-            </span>
+        <label className="mt-5 block text-sm font-medium text-ink/80">
+          시간 신뢰도
+          <select
+            value={timeReliabilityMode}
+            onChange={(event) =>
+              setTimeReliabilityMode(event.target.value as TimeReliabilityMode)
+            }
+            className="mt-2 w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-lagoon/40"
+          >
+            {timeReliabilityModeOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <span className="mt-2 block rounded-2xl border border-ink/10 bg-white/70 px-4 py-3 text-sm font-normal text-ink/65">
+            {
+              timeReliabilityModeOptions.find(
+                (option) => option.value === timeReliabilityMode,
+              )?.description
+            }
           </span>
         </label>
 

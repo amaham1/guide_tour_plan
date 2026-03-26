@@ -23,11 +23,22 @@ function createTrip(
     arrivalMinutes: number;
     departureMinutes: number;
     isEstimated?: boolean;
+    timeReliability?: "OFFICIAL" | "ESTIMATED" | "ROUGH";
+    windowStartMinutes?: number | null;
+    windowEndMinutes?: number | null;
   }>,
 ) {
   const normalizedStopTimes = stopTimes.map((stopTime) => ({
-    ...stopTime,
-    isEstimated: stopTime.isEstimated ?? false,
+    stopId: stopTime.stopId,
+    stopName: stopTime.stopName,
+    sequence: stopTime.sequence,
+    arrivalMinutes: stopTime.arrivalMinutes,
+    departureMinutes: stopTime.departureMinutes,
+    timeReliability:
+      stopTime.timeReliability ??
+      (stopTime.isEstimated ? "ESTIMATED" : "OFFICIAL"),
+    windowStartMinutes: stopTime.windowStartMinutes ?? null,
+    windowEndMinutes: stopTime.windowEndMinutes ?? null,
   }));
 
   return {
@@ -49,7 +60,10 @@ describe("planner scoring", () => {
     totalWalkMinutes: 18,
     transfers: 0,
     finalArrivalMinutes: 720,
-    usesEstimatedStopTimes: false,
+    worstTimeReliability: "OFFICIAL",
+    finalArrivalWindowStartMinutes: null,
+    finalArrivalWindowEndMinutes: null,
+    roughWindowMinutes: 0,
     safetyBufferCost: 5,
     realtimeEligible: true,
   };
@@ -59,7 +73,10 @@ describe("planner scoring", () => {
     totalWalkMinutes: 26,
     transfers: 1,
     finalArrivalMinutes: 760,
-    usesEstimatedStopTimes: true,
+    worstTimeReliability: "ESTIMATED",
+    finalArrivalWindowStartMinutes: null,
+    finalArrivalWindowEndMinutes: null,
+    roughWindowMinutes: 0,
     safetyBufferCost: 15,
     realtimeEligible: false,
   };
@@ -91,7 +108,9 @@ describe("execution realtime fallback", () => {
     transfers: 0,
     finalArrivalAt: "2026-03-23T11:00:00.000Z",
     realtimeEligible: false,
-    usesEstimatedStopTimes: false,
+    worstTimeReliability: "OFFICIAL",
+    finalArrivalWindowStartAt: null,
+    finalArrivalWindowEndAt: null,
     safetyBufferCost: 5,
   };
 
@@ -109,6 +128,7 @@ describe("execution realtime fallback", () => {
             endAt: "2026-03-23T10:30:00.000Z",
             durationMinutes: 30,
             routePatternId: "pattern-without-map",
+            timeReliability: "OFFICIAL",
           },
         ],
       },
@@ -127,6 +147,7 @@ describe("planner engine long-distance routing", () => {
     const input: PlannerEngineInput = {
       startAt: "2026-03-24T08:00:00+09:00",
       includeGeneratedTimes: false,
+      timeReliabilityMode: "OFFICIAL_ONLY",
       places: [
         {
           placeId: "place-dongmun",
@@ -139,7 +160,7 @@ describe("planner engine long-distance routing", () => {
       ],
     };
 
-    const context: PlannerGraphContext = {
+    const context = {
       places: new Map([
         [
           "place-dongmun",
@@ -275,6 +296,9 @@ describe("planner engine long-distance routing", () => {
               arrivalMinutes: 540,
               departureMinutes: 540,
               isEstimated: false,
+              timeReliability: "OFFICIAL",
+              windowStartMinutes: null,
+              windowEndMinutes: null,
             },
             {
               stopId: "stop-transfer",
@@ -283,6 +307,9 @@ describe("planner engine long-distance routing", () => {
               arrivalMinutes: 600,
               departureMinutes: 600,
               isEstimated: false,
+              timeReliability: "OFFICIAL",
+              windowStartMinutes: null,
+              windowEndMinutes: null,
             },
           ],
           stopTimeByStopId: new Map([
@@ -295,6 +322,9 @@ describe("planner engine long-distance routing", () => {
                 arrivalMinutes: 540,
                 departureMinutes: 540,
                 isEstimated: false,
+                timeReliability: "OFFICIAL",
+                windowStartMinutes: null,
+                windowEndMinutes: null,
               },
             ],
             [
@@ -306,6 +336,9 @@ describe("planner engine long-distance routing", () => {
                 arrivalMinutes: 600,
                 departureMinutes: 600,
                 isEstimated: false,
+                timeReliability: "OFFICIAL",
+                windowStartMinutes: null,
+                windowEndMinutes: null,
               },
             ],
           ]),
@@ -324,6 +357,9 @@ describe("planner engine long-distance routing", () => {
               arrivalMinutes: 610,
               departureMinutes: 610,
               isEstimated: false,
+              timeReliability: "OFFICIAL",
+              windowStartMinutes: null,
+              windowEndMinutes: null,
             },
             {
               stopId: "stop-seongsan",
@@ -332,6 +368,9 @@ describe("planner engine long-distance routing", () => {
               arrivalMinutes: 680,
               departureMinutes: 680,
               isEstimated: false,
+              timeReliability: "OFFICIAL",
+              windowStartMinutes: null,
+              windowEndMinutes: null,
             },
           ],
           stopTimeByStopId: new Map([
@@ -344,6 +383,9 @@ describe("planner engine long-distance routing", () => {
                 arrivalMinutes: 610,
                 departureMinutes: 610,
                 isEstimated: false,
+                timeReliability: "OFFICIAL",
+                windowStartMinutes: null,
+                windowEndMinutes: null,
               },
             ],
             [
@@ -355,13 +397,16 @@ describe("planner engine long-distance routing", () => {
                 arrivalMinutes: 680,
                 departureMinutes: 680,
                 isEstimated: false,
+                timeReliability: "OFFICIAL",
+                windowStartMinutes: null,
+                windowEndMinutes: null,
               },
             ],
           ]),
         },
       ],
       realtimePatternIds: new Set(),
-    };
+    } as unknown as PlannerGraphContext;
 
     const candidates = buildPlannerCandidates("plan-long-hop", input, context);
 
@@ -380,6 +425,7 @@ describe("planner engine access stop optimization", () => {
     const input: PlannerEngineInput = {
       startAt: "2026-03-24T08:40:00+09:00",
       includeGeneratedTimes: false,
+      timeReliabilityMode: "OFFICIAL_ONLY",
       places: [
         {
           placeId: "place-start",
@@ -585,6 +631,7 @@ describe("planner engine access stop optimization", () => {
     const input: PlannerEngineInput = {
       startAt: "2026-03-24T08:40:00+09:00",
       includeGeneratedTimes: false,
+      timeReliabilityMode: "OFFICIAL_ONLY",
       places: [
         {
           placeId: "place-start",
@@ -830,6 +877,7 @@ describe("planner engine derived stop times", () => {
     const input: PlannerEngineInput = {
       startAt: "2026-03-24T09:00:00+09:00",
       includeGeneratedTimes: true,
+      timeReliabilityMode: "INCLUDE_ESTIMATED",
       places: [
         {
           placeId: "place-start",
@@ -933,6 +981,9 @@ describe("planner engine derived stop times", () => {
             arrivalMinutes: 560,
             departureMinutes: 560,
             isEstimated: false,
+            timeReliability: "OFFICIAL",
+            windowStartMinutes: null,
+            windowEndMinutes: null,
           },
           {
             stopId: "stop-end",
@@ -941,6 +992,9 @@ describe("planner engine derived stop times", () => {
             arrivalMinutes: 590,
             departureMinutes: 590,
             isEstimated: true,
+            timeReliability: "ESTIMATED",
+            windowStartMinutes: null,
+            windowEndMinutes: null,
           },
         ]),
       ],
@@ -950,7 +1004,7 @@ describe("planner engine derived stop times", () => {
     const candidates = buildPlannerCandidates("plan-derived", input, context);
 
     expect(candidates.length).toBeGreaterThan(0);
-    expect(candidates[0]?.summary.usesEstimatedStopTimes).toBe(true);
+    expect(candidates[0]?.summary.worstTimeReliability).toBe("ESTIMATED");
     expect(candidates[0]?.warnings.some((warning) => warning.code === "ESTIMATED_STOP_TIMES")).toBe(
       true,
     );

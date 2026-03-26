@@ -35,16 +35,42 @@ export const planPlaceInputSchema = z.discriminatedUnion("mode", [
   externalPlanPlaceInputSchema,
 ]);
 
-export const planRequestSchema = z.object({
-  language: z.string().trim().default("ko"),
-  startAt: z
-    .string()
-    .trim()
-    .refine((value) => !Number.isNaN(Date.parse(value)), "유효한 날짜여야 합니다."),
-  includeGeneratedTimes: z.coerce.boolean().default(false),
-  preference: z.nativeEnum(PlanPreference).optional(),
-  places: z.array(planPlaceInputSchema).min(2).max(5),
-});
+export const timeReliabilityModeSchema = z.enum([
+  "OFFICIAL_ONLY",
+  "INCLUDE_ESTIMATED",
+  "ALLOW_ROUGH",
+]);
+
+export const candidateTimeReliabilitySchema = z.enum([
+  "OFFICIAL",
+  "ESTIMATED",
+  "ROUGH",
+]);
+
+export const planRequestSchema = z
+  .object({
+    language: z.string().trim().default("ko"),
+    startAt: z
+      .string()
+      .trim()
+      .refine((value) => !Number.isNaN(Date.parse(value)), "유효한 날짜여야 합니다."),
+    includeGeneratedTimes: z.coerce.boolean().optional(),
+    timeReliabilityMode: timeReliabilityModeSchema.optional(),
+    preference: z.nativeEnum(PlanPreference).optional(),
+    places: z.array(planPlaceInputSchema).min(2).max(5),
+  })
+  .transform((input) => {
+    const timeReliabilityMode =
+      input.timeReliabilityMode ??
+      (input.includeGeneratedTimes ? "INCLUDE_ESTIMATED" : "OFFICIAL_ONLY");
+
+    return {
+      ...input,
+      includeGeneratedTimes:
+        input.includeGeneratedTimes ?? timeReliabilityMode !== "OFFICIAL_ONLY",
+      timeReliabilityMode,
+    };
+  });
 
 export const createSessionSchema = z.object({
   planCandidateId: z.string().trim().min(1),
@@ -55,9 +81,13 @@ export type SearchRequest = z.infer<typeof searchRequestSchema>;
 export type PlannerPlaceInput = z.infer<typeof planPlaceInputSchema>;
 export type PlannerStoredPlaceInput = z.infer<typeof storedPlanPlaceInputSchema>;
 export type PlannerExternalPlaceInput = z.infer<typeof externalPlanPlaceInputSchema>;
+export type TimeReliabilityMode = z.infer<typeof timeReliabilityModeSchema>;
+export type CandidateTimeReliability = z.infer<typeof candidateTimeReliabilitySchema>;
+
 export type PlannerEngineInput = {
   startAt: string;
   includeGeneratedTimes: boolean;
+  timeReliabilityMode: TimeReliabilityMode;
   places: Array<{
     placeId: string;
     dwellMinutes: number;
@@ -69,6 +99,7 @@ export type CandidateLegKind = "visit" | "walk" | "wait" | "ride";
 export type CandidateWarningCode =
   | "OPENING_HOURS_CONFLICT"
   | "ESTIMATED_STOP_TIMES"
+  | "ROUGH_STOP_TIMES"
   | "REALTIME_UNAVAILABLE"
   | "TRANSFER_REQUIRED";
 
@@ -93,7 +124,9 @@ export type CandidateLeg = {
   placeId?: string;
   fromStopId?: string;
   toStopId?: string;
-  estimated?: boolean;
+  timeReliability: CandidateTimeReliability;
+  startWindowAt?: string | null;
+  endWindowAt?: string | null;
 };
 
 export type CandidateSummary = {
@@ -105,7 +138,9 @@ export type CandidateSummary = {
   transfers: number;
   finalArrivalAt: string;
   realtimeEligible: boolean;
-  usesEstimatedStopTimes: boolean;
+  worstTimeReliability: CandidateTimeReliability;
+  finalArrivalWindowStartAt?: string | null;
+  finalArrivalWindowEndAt?: string | null;
   safetyBufferCost: number;
 };
 
@@ -122,6 +157,8 @@ export type PlannerResultDto = {
   planId: string;
   startAt: string;
   includeGeneratedTimes: boolean;
+  timeReliabilityMode: TimeReliabilityMode;
+  nextSuggestedTimeReliabilityMode?: TimeReliabilityMode;
   preference?: PlanPreference;
   places: Array<{
     placeId: string;
@@ -164,7 +201,10 @@ export type CandidateMetrics = {
   totalWalkMinutes: number;
   transfers: number;
   finalArrivalMinutes: number;
-  usesEstimatedStopTimes: boolean;
+  worstTimeReliability: CandidateTimeReliability;
+  finalArrivalWindowStartMinutes: number | null;
+  finalArrivalWindowEndMinutes: number | null;
+  roughWindowMinutes: number;
   safetyBufferCost: number;
   realtimeEligible: boolean;
 };

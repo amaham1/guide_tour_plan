@@ -33,6 +33,12 @@ enum PlanPreference {
   LEAST_TRANSFER
 }
 
+enum TimeReliabilityMode {
+  OFFICIAL_ONLY
+  INCLUDE_ESTIMATED
+  ALLOW_ROUGH
+}
+
 enum SessionStatus {
   ACTIVE
   COMPLETED
@@ -289,6 +295,8 @@ model DerivedStopTime {
   sequence            Int
   arrivalMinutes      Int
   departureMinutes    Int
+  windowStartMinutes  Int?
+  windowEndMinutes    Int?
   timeSource          StopTimeSourceKind @default(OFFICIAL_ANCHOR_INTERPOLATED)
   confidence          Float              @default(0)
   anchorStartSequence Int?
@@ -390,6 +398,7 @@ model PlanQuery {
   language   String
   startAt    DateTime
   includeGeneratedTimes Boolean @default(false)
+  timeReliabilityMode TimeReliabilityMode @default(OFFICIAL_ONLY)
   preference PlanPreference?
   status     String           @default("READY")
   places     PlanQueryPlace[]

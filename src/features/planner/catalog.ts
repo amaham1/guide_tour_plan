@@ -13,6 +13,8 @@ export type PlannerCatalogStatus = {
   timetableRoutePatternCount: number;
   officialStopCount: number;
   generatedStopCount: number;
+  estimatedGeneratedStopCount: number;
+  roughGeneratedStopCount: number;
   searchableStopCount: number;
   unresolvedStopCount: number;
   estimatedStopTimeCount: number;
@@ -66,6 +68,8 @@ export async function getPlannerCatalogStatus(prisma: PrismaClient = db) {
         timetableRoutePatternCount,
         officialStopCount,
         generatedStopCount,
+        estimatedGeneratedStopCount,
+        roughGeneratedStopCount,
         searchableStopCount,
         unresolvedStopCount,
         estimatedStopTimeCount,
@@ -171,6 +175,44 @@ export async function getPlannerCatalogStatus(prisma: PrismaClient = db) {
             WHERE rp."isActive" = 1
               AND r."isActive" = 1
               AND s."isActive" = 1
+          `,
+        ),
+        getRawCount(
+          prisma,
+          Prisma.sql`
+            SELECT COUNT(DISTINCT dst."stopId") AS count
+            FROM "DerivedStopTime" AS dst
+            INNER JOIN "Trip" AS t
+              ON t."id" = dst."tripId"
+            INNER JOIN "RoutePattern" AS rp
+              ON rp."id" = t."routePatternId"
+            INNER JOIN "Route" AS r
+              ON r."id" = rp."routeId"
+            INNER JOIN "RoutePatternScheduleSource" AS s
+              ON s."id" = t."scheduleSourceId"
+            WHERE rp."isActive" = 1
+              AND r."isActive" = 1
+              AND s."isActive" = 1
+              AND dst."timeSource" <> 'DISTANCE_INTERPOLATED'
+          `,
+        ),
+        getRawCount(
+          prisma,
+          Prisma.sql`
+            SELECT COUNT(DISTINCT dst."stopId") AS count
+            FROM "DerivedStopTime" AS dst
+            INNER JOIN "Trip" AS t
+              ON t."id" = dst."tripId"
+            INNER JOIN "RoutePattern" AS rp
+              ON rp."id" = t."routePatternId"
+            INNER JOIN "Route" AS r
+              ON r."id" = rp."routeId"
+            INNER JOIN "RoutePatternScheduleSource" AS s
+              ON s."id" = t."scheduleSourceId"
+            WHERE rp."isActive" = 1
+              AND r."isActive" = 1
+              AND s."isActive" = 1
+              AND dst."timeSource" = 'DISTANCE_INTERPOLATED'
           `,
         ),
         getRawCount(
@@ -336,6 +378,8 @@ export async function getPlannerCatalogStatus(prisma: PrismaClient = db) {
         timetableRoutePatternCount,
         officialStopCount,
         generatedStopCount,
+        estimatedGeneratedStopCount,
+        roughGeneratedStopCount,
         searchableStopCount,
         unresolvedStopCount,
         estimatedStopTimeCount,
@@ -358,7 +402,7 @@ export async function getPlannerCatalogStatus(prisma: PrismaClient = db) {
     });
   }
 
-  return catalogStatusPromise;
+  return catalogStatusPromise!;
 }
 
 export async function assertPlannerCatalogReady(prisma: PrismaClient = db) {
