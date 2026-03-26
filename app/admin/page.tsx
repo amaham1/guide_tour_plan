@@ -9,6 +9,19 @@ function formatUnknownDate(value: string | Date | null) {
   return value ? formatDateTime(value) : "none";
 }
 
+function formatTimetableSyncStatus(status: string) {
+  switch (status) {
+    case "in_sync":
+      return "In sync";
+    case "refreshing":
+      return "Refreshing";
+    case "stale":
+      return "Stale";
+    default:
+      return "Idle";
+  }
+}
+
 export default async function AdminPage() {
   if (!appEnv.enableInternalAdmin) {
     notFound();
@@ -42,20 +55,17 @@ export default async function AdminPage() {
               ["Stop", dashboard.catalogStatus.stopCount],
               ["Route Pattern", dashboard.catalogStatus.routePatternCount],
               ["Trip", dashboard.catalogStatus.tripCount],
+              ["Official Stop", dashboard.catalogStatus.officialStopCount],
+              ["Generated Stop", dashboard.catalogStatus.generatedStopCount],
               ["Walk Link", dashboard.catalogStatus.walkLinkCount],
               ["Geometry", dashboard.catalogStatus.routeGeometryCount],
               ["Projection", dashboard.catalogStatus.stopProjectionCount],
-              ["Segment Profile", dashboard.catalogStatus.segmentProfileCount],
             ].map(([label, value]) => (
               <div key={label} className="rounded-2xl border border-ink/8 bg-white p-4">
                 <p className="text-sm text-ink/55">{label}</p>
                 <p className="mt-1 text-2xl font-semibold text-ink">{String(value)}</p>
               </div>
             ))}
-          </div>
-
-          <div className="mt-4 rounded-2xl border border-ink/8 bg-white p-4 text-sm text-ink/65">
-            latest bus customize: {formatUnknownDate(dashboard.catalogStatus.lastBusCustomizeAt)}
           </div>
         </section>
 
@@ -130,6 +140,184 @@ export default async function AdminPage() {
         </section>
 
         <section className="grid gap-6 xl:grid-cols-3">
+          <article className="rounded-[2rem] border border-ink/10 bg-[rgba(255,252,246,0.92)] p-6 shadow-tide xl:col-span-3">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h2 className="text-2xl font-semibold text-ink">Schedule Matching</h2>
+                <p className="mt-2 text-sm text-ink/60">
+                  Latest `routes-html` diagnostics for sparse official timetable matching.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-ink/8 bg-white px-4 py-3 text-sm text-ink/60">
+                latest {formatUnknownDate(dashboard.scheduleMatchingStats.latestRoutesHtmlAt)}
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 md:grid-cols-4">
+              {[
+                ["Active Source", dashboard.scheduleMatchingStats.activeScheduleSourceCount],
+                ["Matched Variant", dashboard.scheduleMatchingStats.matchedVariantCount],
+                ["Unmatched Variant", dashboard.scheduleMatchingStats.unmatchedVariantCount],
+                ["Skipped Variant", dashboard.scheduleMatchingStats.skippedVariantCount],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-2xl border border-ink/8 bg-white p-4">
+                  <p className="text-sm text-ink/55">{label}</p>
+                  <p className="mt-1 text-2xl font-semibold text-ink">{String(value)}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-5 grid gap-4 xl:grid-cols-3">
+              <div className="rounded-2xl border border-ink/8 bg-white p-4">
+                <h3 className="text-lg font-semibold text-ink">Top Matched Families</h3>
+                <div className="mt-4 space-y-3">
+                  {dashboard.scheduleMatchingStats.matchedRouteLabels.length === 0 ? (
+                    <p className="text-sm text-ink/55">No matched families yet.</p>
+                  ) : (
+                    dashboard.scheduleMatchingStats.matchedRouteLabels.map((item) => (
+                      <div key={item.shortName} className="rounded-xl border border-ink/8 px-3 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-medium text-ink">{item.shortName}</p>
+                          <span className="text-sm text-ink/55">{item.count}</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-ink/8 bg-white p-4">
+                <h3 className="text-lg font-semibold text-ink">Top Unmatched Families</h3>
+                <div className="mt-4 space-y-3">
+                  {dashboard.scheduleMatchingStats.unmatchedRouteLabels.length === 0 ? (
+                    <p className="text-sm text-ink/55">No unmatched families.</p>
+                  ) : (
+                    dashboard.scheduleMatchingStats.unmatchedRouteLabels.map((item) => (
+                      <div key={item.shortName} className="rounded-xl border border-ink/8 px-3 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-medium text-ink">{item.shortName}</p>
+                          <span className="text-sm text-ink/55">{item.count}</span>
+                        </div>
+                        <p className="mt-1 text-sm text-ink/55">
+                          {item.reasons.length === 0
+                            ? "no reason breakdown"
+                            : item.reasons
+                                .map((reason: { reason: string; count: number }) => `${reason.reason} ${reason.count}`)
+                                .join(" | ")}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-ink/8 bg-white p-4">
+                <h3 className="text-lg font-semibold text-ink">Near Misses</h3>
+                <div className="mt-4 space-y-3">
+                  {dashboard.scheduleMatchingStats.nearMisses.length === 0 ? (
+                    <p className="text-sm text-ink/55">No near misses recorded.</p>
+                  ) : (
+                    dashboard.scheduleMatchingStats.nearMisses.map((item) => (
+                      <div
+                        key={`${item.scheduleId}-${item.variantKey}-${item.bestCandidate?.routePatternId ?? "none"}`}
+                        className="rounded-xl border border-ink/8 px-3 py-3"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-medium text-ink">
+                              {item.shortName} [{item.variantKey}]
+                            </p>
+                            <p className="text-sm text-ink/55">
+                              schedule {item.scheduleId} | stops {item.stopCount} | rows {item.tripCount}
+                            </p>
+                          </div>
+                          <span className="text-sm text-ink/55">
+                            {Math.round((item.bestCandidate?.coverageRatio ?? 0) * 100)}%
+                          </span>
+                        </div>
+                        <p className="mt-2 text-sm text-ink/55">
+                          candidate {item.bestCandidate?.shortName ?? "-"} |{" "}
+                          {item.bestCandidate?.displayName ?? item.bestCandidate?.directionLabel ?? "-"}
+                        </p>
+                        <p className="mt-1 text-sm text-ink/55">
+                          subtype {item.reasonSubtype ?? "unknown"} | reason {item.reason}
+                        </p>
+                        <p className="mt-1 text-sm text-ink/55">
+                          unmatched{" "}
+                          {(item.bestCandidate?.unmatchedStopNames ?? []).length > 0
+                            ? item.bestCandidate?.unmatchedStopNames.join(", ")
+                            : "none"}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 xl:grid-cols-2">
+              <div className="rounded-2xl border border-ink/8 bg-white p-4">
+                <h3 className="text-lg font-semibold text-ink">Mixed Variant Diagnostics</h3>
+                <p className="mt-2 text-sm text-ink/55">
+                  inherited rows {dashboard.scheduleMatchingStats.inheritedVariantRowCount} | unresolved rows{" "}
+                  {dashboard.scheduleMatchingStats.unresolvedVariantRowCount}
+                </p>
+                <div className="mt-4 space-y-3">
+                  {dashboard.scheduleMatchingStats.unresolvedMixedVariantSchedules.length === 0 &&
+                  dashboard.scheduleMatchingStats.resolvedMixedVariantSchedules.length === 0 ? (
+                    <p className="text-sm text-ink/55">No mixed variant schedules recorded.</p>
+                  ) : (
+                    <>
+                      {dashboard.scheduleMatchingStats.unresolvedMixedVariantSchedules.map((item) => (
+                        <div
+                          key={`unresolved-${item.scheduleId}`}
+                          className="rounded-xl border border-coral/15 px-3 py-3"
+                        >
+                          <p className="font-medium text-ink">{item.shortName}</p>
+                          <p className="mt-1 text-sm text-ink/55">
+                            schedule {item.scheduleId} | inherited {item.inheritedVariantRowCount} |
+                            unresolved {item.unresolvedVariantRowCount}
+                          </p>
+                        </div>
+                      ))}
+                      {dashboard.scheduleMatchingStats.resolvedMixedVariantSchedules.map((item) => (
+                        <div
+                          key={`resolved-${item.scheduleId}`}
+                          className="rounded-xl border border-ink/8 px-3 py-3"
+                        >
+                          <p className="font-medium text-ink">{item.shortName}</p>
+                          <p className="mt-1 text-sm text-ink/55">
+                            schedule {item.scheduleId} | inherited {item.inheritedVariantRowCount}
+                          </p>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-ink/8 bg-white p-4">
+                <h3 className="text-lg font-semibold text-ink">Rejection Breakdown</h3>
+                <div className="mt-4 space-y-3">
+                  {dashboard.scheduleMatchingStats.rejectionBreakdown.length === 0 ? (
+                    <p className="text-sm text-ink/55">No rejection breakdown recorded.</p>
+                  ) : (
+                    dashboard.scheduleMatchingStats.rejectionBreakdown.map((item) => (
+                      <div key={`${item.reason}-${item.reasonSubtype}`} className="rounded-xl border border-ink/8 px-3 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-medium text-ink">
+                            {item.reasonSubtype} / {item.reason}
+                          </p>
+                          <span className="text-sm text-ink/55">{item.count}</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </article>
+
           <article className="rounded-[2rem] border border-ink/10 bg-[rgba(255,252,246,0.92)] p-6 shadow-tide">
             <h2 className="text-2xl font-semibold text-ink">POI Join Exceptions</h2>
             <div className="mt-5 space-y-3">
@@ -157,12 +345,16 @@ export default async function AdminPage() {
                 <div key={pattern.id} className="rounded-2xl border border-ink/8 bg-white px-4 py-4">
                   <p className="font-semibold text-ink">{pattern.label}</p>
                   <p className="mt-1 text-sm text-ink/55">
-                    stops {pattern.stopCount} | trips {pattern.tripCount}
+                    stops {pattern.stopCount} | active sources {pattern.scheduleSourceCount} | trips {pattern.tripCount}
                   </p>
                   <p className="mt-1 text-sm text-ink/55">
                     sequence {pattern.sequenceOk ? "OK" : "CHECK"} | distance{" "}
                     {pattern.distanceMonotonic ? "OK" : "CHECK"} | unresolved stop{" "}
                     {pattern.placeholderStopCount}
+                  </p>
+                  <p className="mt-1 text-sm text-ink/55">
+                    official stop times {pattern.officialStopTimeCount} | generated stop times{" "}
+                    {pattern.generatedStopTimeCount}
                   </p>
                   <p className="mt-1 text-sm text-ink/55">
                     geometry {pattern.geometrySource ?? "NONE"} | confidence{" "}
@@ -177,7 +369,35 @@ export default async function AdminPage() {
 
           <article className="rounded-[2rem] border border-ink/10 bg-[rgba(255,252,246,0.92)] p-6 shadow-tide">
             <h2 className="text-2xl font-semibold text-ink">Timetable / Vehicle / Geometry</h2>
-            <div className="rounded-2xl border border-ink/8 bg-white p-4">
+            <div
+              className={`rounded-2xl border p-4 ${
+                dashboard.timetableSyncStats.status === "stale" ||
+                dashboard.timetableSyncStats.zeroTripScheduleSourceCount > 0
+                  ? "border-coral/20 bg-coral/5"
+                  : "border-ink/8 bg-white"
+              }`}
+            >
+              <p className="text-sm text-ink/55">Timetable materialization</p>
+              <p className="mt-1 text-2xl font-semibold text-ink">
+                {formatTimetableSyncStatus(dashboard.timetableSyncStats.status)}
+              </p>
+              <p className="mt-1 text-sm text-ink/55">
+                routes-html {formatUnknownDate(dashboard.timetableSyncStats.latestRoutesHtmlAt)}
+                <br />
+                timetables-xlsx {formatUnknownDate(dashboard.timetableSyncStats.latestTimetablesXlsxAt)}{" "}
+                {dashboard.timetableSyncStats.latestTimetablesXlsxStatus
+                  ? `(${dashboard.timetableSyncStats.latestTimetablesXlsxStatus})`
+                  : ""}
+              </p>
+              <p className="mt-1 text-sm text-ink/55">
+                active sources without trips {dashboard.timetableSyncStats.zeroTripScheduleSourceCount}
+                {dashboard.timetableSyncStats.lagMinutes !== null
+                  ? ` | stale by ${dashboard.timetableSyncStats.lagMinutes} min`
+                  : ""}
+              </p>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-ink/8 bg-white p-4">
               <p className="text-sm text-ink/55">Vehicle map coverage</p>
               <p className="mt-1 text-2xl font-semibold text-ink">
                 {dashboard.vehicleMapStats.successRate}%
@@ -189,14 +409,12 @@ export default async function AdminPage() {
 
             <div className="mt-4 rounded-2xl border border-ink/8 bg-white p-4 text-sm text-ink/55">
               geometry coverage {dashboard.geometryStats.geometryCoverage}% | projection coverage{" "}
-              {dashboard.geometryStats.projectionCoverage}% | segment profiles{" "}
-              {dashboard.geometryStats.segmentProfileCount}
-              <br />
-              latest customize {formatUnknownDate(dashboard.geometryStats.latestCustomizeAt)}
+              {dashboard.geometryStats.projectionCoverage}%
               <br />
               route-geometries {formatUnknownDate(dashboard.geometryStats.latestRouteGeometryAt)}
               <br />
-              GTFS configured {dashboard.geometryStats.gtfsConfigured ? "YES" : "NO"} | GTFS match{" "}
+              GTFS configured {dashboard.geometryStats.gtfsConfigured ? "YES" : "NO"} | BIS link{" "}
+              {dashboard.geometryStats.busJejuLinkCount} | GTFS match{" "}
               {dashboard.geometryStats.gtfsMatchCount} | OSRM fallback{" "}
               {dashboard.geometryStats.fallbackCount}
               {dashboard.geometryStats.gtfsSource ? (
@@ -227,15 +445,34 @@ export default async function AdminPage() {
               ) : null}
             </div>
 
+            {dashboard.timetableSyncStats.zeroTripScheduleSources.length > 0 ? (
+              <div className="mt-4 rounded-2xl border border-coral/15 bg-white p-4">
+                <h3 className="text-lg font-semibold text-ink">Active Sources Without Trips</h3>
+                <div className="mt-4 space-y-3">
+                  {dashboard.timetableSyncStats.zeroTripScheduleSources.map((source) => (
+                    <div key={source.id} className="rounded-xl border border-ink/8 px-3 py-3">
+                      <p className="font-medium text-ink">
+                        {source.routePattern.route.shortName} {source.routePattern.directionLabel}
+                      </p>
+                      <p className="mt-1 text-sm text-ink/55">
+                        schedule {source.scheduleId} [{source.variantKey}] | {source.routePattern.displayName}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             <div className="mt-5 space-y-3">
               {dashboard.timetableReview.map((pattern) => (
                 <div key={pattern.id} className="rounded-2xl border border-ink/8 bg-white px-4 py-4">
                   <p className="font-semibold text-ink">{pattern.label}</p>
                   <p className="mt-1 text-sm text-ink/55">
-                    trips {pattern.tripCount} | estimated stop times {pattern.estimatedStopTimeCount}
+                    trips {pattern.tripCount} | official stop times {pattern.officialStopTimeCount} |
+                    generated stop times {pattern.generatedStopTimeCount}
                   </p>
                   <p className="mt-1 text-sm text-ink/55">
-                    {pattern.hasTrips ? "trip data present" : "no trips"}
+                    {pattern.hasTrips ? `${pattern.coverage} coverage` : "no trips"}
                   </p>
                 </div>
               ))}

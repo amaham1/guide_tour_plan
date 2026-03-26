@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { syncSourceCatalog } from "@/lib/source-catalog";
 import { createWorkerRuntime } from "@/worker/core/runtime";
 import { jobRegistry } from "@/worker/jobs/registry";
+import type { JobOutcome } from "@/worker/jobs/types";
 
 const defaultRunAllOrder = [
   "stops",
@@ -13,16 +14,20 @@ const defaultRunAllOrder = [
   "timetables-xlsx",
   "walk-links",
   "vehicle-device-map",
-  "segment-profiles",
-  "osrm-bus-customize",
   "transit-audit",
   "visit-jeju-places",
 ] as const;
+
+const followUpJobsByKey: Record<string, readonly string[]> = {
+  "routes-html": ["timetables-xlsx"],
+};
 
 type RunOptions = {
   prisma?: PrismaClient;
   triggeredBy?: string;
 };
+
+export type JobRunResults = Record<string, JobOutcome>;
 
 async function runSingleJob(jobKey: string, options: RunOptions = {}) {
   const runtime = createWorkerRuntime(options);
@@ -34,6 +39,10 @@ async function runSingleJob(jobKey: string, options: RunOptions = {}) {
 
   if (!job) {
     throw new Error(`Unknown ingest job: ${jobKey}`);
+  }
+
+  if (!job.isActive) {
+    throw new Error(`Disabled ingest job: ${jobKey}`);
   }
 
   const handler = jobRegistry[jobKey];
@@ -112,11 +121,50 @@ async function runSingleJob(jobKey: string, options: RunOptions = {}) {
 }
 
 export async function runJobByKey(jobKey: string, options: RunOptions = {}) {
-  return runSingleJob(jobKey, options);
+  const results: JobRunResults = {};
+  const queue: Array<{
+    jobKey: string;
+    triggeredBy?: string;
+    parentJobKey?: string;
+  }> = [{ jobKey, triggeredBy: options.triggeredBy }];
+  const executedJobs = new Set<string>();
+
+  while (queue.length > 0) {
+    const nextJob = queue.shift();
+    if (!nextJob || executedJobs.has(nextJob.jobKey)) {
+      continue;
+    }
+
+    if (nextJob.parentJobKey) {
+      console.log(
+        `[worker] scheduling follow-up ${nextJob.jobKey} after ${nextJob.parentJobKey}`,
+      );
+    }
+
+    results[nextJob.jobKey] = await runSingleJob(nextJob.jobKey, {
+      ...options,
+      triggeredBy: nextJob.triggeredBy,
+    });
+    executedJobs.add(nextJob.jobKey);
+
+    for (const followUpJobKey of followUpJobsByKey[nextJob.jobKey] ?? []) {
+      if (executedJobs.has(followUpJobKey)) {
+        continue;
+      }
+
+      queue.push({
+        jobKey: followUpJobKey,
+        triggeredBy: buildFollowUpTriggeredBy(nextJob.triggeredBy, nextJob.jobKey),
+        parentJobKey: nextJob.jobKey,
+      });
+    }
+  }
+
+  return results;
 }
 
 export async function runAllJobs(options: RunOptions = {}) {
-  const results: Record<string, Awaited<ReturnType<typeof runSingleJob>>> = {};
+  const results: JobRunResults = {};
 
   for (const jobKey of defaultRunAllOrder) {
     if (!jobRegistry[jobKey]) {
@@ -126,4 +174,9 @@ export async function runAllJobs(options: RunOptions = {}) {
   }
 
   return results;
+}
+
+function buildFollowUpTriggeredBy(triggeredBy: string | undefined, parentJobKey: string) {
+  const base = triggeredBy?.trim() ? triggeredBy.trim() : "worker";
+  return `${base}:follow-up:${parentJobKey}`;
 }

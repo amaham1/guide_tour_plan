@@ -11,8 +11,8 @@ async function main() {
   const shouldRunAll = process.argv.includes("--run-all");
 
   if (jobKey) {
-    const outcome = await runJobByKey(jobKey, { triggeredBy: "cli" });
-    console.log(JSON.stringify({ jobKey, outcome }, null, 2));
+    const results = await runJobByKey(jobKey, { triggeredBy: "cli" });
+    console.log(JSON.stringify({ jobKey, results }, null, 2));
     return;
   }
 
@@ -22,9 +22,25 @@ async function main() {
     return;
   }
 
+  const activeJobs = await db.ingestJob.findMany({
+    where: {
+      isActive: true,
+    },
+    orderBy: {
+      key: "asc",
+    },
+    select: {
+      key: true,
+    },
+  });
+
   console.log("Available worker jobs:");
-  for (const jobKey of Object.keys(jobRegistry)) {
-    console.log(`- ${jobKey}`);
+  for (const job of activeJobs) {
+    if (!jobRegistry[job.key]) {
+      continue;
+    }
+
+    console.log(`- ${job.key}`);
   }
   console.log("");
   console.log("Run `npm run worker -- --job <jobKey>` or `npm run worker:run-all`.");

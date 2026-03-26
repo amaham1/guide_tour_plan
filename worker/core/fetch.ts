@@ -8,9 +8,19 @@ const insecureDispatcher = new Agent({
   },
 });
 
-const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
+const DEFAULT_FETCH_TIMEOUT_MS = 25_000;
+const MAX_FETCH_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 300;
 
 type QueryValue = string | number | undefined | null;
+
+export function normalizeServiceKeyQueryValue(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 
 function buildUrl(url: string, query?: Record<string, QueryValue>) {
   if (!query) {
@@ -24,7 +34,12 @@ function buildUrl(url: string, query?: Record<string, QueryValue>) {
       continue;
     }
 
-    nextUrl.searchParams.set(key, String(value));
+    const normalizedValue =
+      typeof value === "string" && key.toLowerCase() === "servicekey"
+        ? normalizeServiceKeyQueryValue(value)
+        : String(value);
+
+    nextUrl.searchParams.set(key, normalizedValue);
   }
 
   return nextUrl.toString();
@@ -39,30 +54,41 @@ export async function readLocalFile(source: string) {
 }
 
 async function fetchWithRetry(url: string, init?: RequestInit) {
-  const buildInit = (baseInit?: RequestInit) => ({
+  const useInsecureFallback =
+    url.includes("bus.jeju.go.kr") ||
+    url.includes("jejudatahub.net") ||
+    url.includes("api.visitjeju.net");
+  const buildInit = (baseInit?: RequestInit, useInsecureDispatcher = false) => ({
     ...baseInit,
     cache: "no-store" as const,
     signal: baseInit?.signal ?? AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS),
+    ...(useInsecureDispatcher ? ({ dispatcher: insecureDispatcher } as RequestInit) : {}),
   });
-
-  try {
-    return await fetch(url, {
-      ...buildInit(init),
-    });
-  } catch (error) {
-    if (
-      url.includes("bus.jeju.go.kr") ||
-      url.includes("jejudatahub.net") ||
-      url.includes("api.visitjeju.net")
-    ) {
-      return fetch(url, {
-        ...buildInit(init),
-        dispatcher: insecureDispatcher,
-      } as RequestInit);
+  const isRetryableError = (error: unknown) => {
+    if (!(error instanceof Error)) {
+      return false;
     }
 
-    throw error;
+    const message = `${error.name} ${error.message}`;
+    return /abort|timeout|timed out|fetch failed|terminated|socket|network|und_err/i.test(message);
+  };
+
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt += 1) {
+    try {
+      return await fetch(url, buildInit(init, useInsecureFallback && attempt > 0));
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableError(error) || attempt === MAX_FETCH_ATTEMPTS - 1) {
+        break;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * (attempt + 1)));
+    }
   }
+
+  throw lastError;
 }
 
 export async function fetchBuffer(

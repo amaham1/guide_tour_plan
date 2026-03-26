@@ -30,6 +30,21 @@ export type BusJejuLineInfo = BusJejuLineCandidate & {
   stationInfoList: BusJejuStationRecord[];
 };
 
+export type BusJejuLinkPoint = {
+  localX: string | number;
+  localY: string | number;
+};
+
+export type BusJejuRealtimePosition = {
+  vhId?: string | number | null;
+  plateNo?: string | null;
+  currStationId?: string | number | null;
+  currStationNm?: string | null;
+  localX?: string | number | null;
+  localY?: string | number | null;
+  lowPlateTp?: string | null;
+};
+
 const defaultIslandBounds = {
   southWestLat: "33.05",
   southWestLng: "126.10",
@@ -82,6 +97,34 @@ export async function fetchBusJejuLineInfo(
   return postBusJejuJson<BusJejuLineInfo>(
     runtime,
     "/data/search/getLineInfoByLineId",
+    {
+      lineId,
+      type: "2",
+    },
+  );
+}
+
+export async function fetchBusJejuLinkInfo(
+  runtime: WorkerRuntime,
+  lineId: string | number,
+) {
+  return postBusJejuJson<BusJejuLinkPoint[]>(
+    runtime,
+    "/data/search/getLinkInfoByLineId",
+    {
+      lineId,
+      type: "2",
+    },
+  );
+}
+
+export async function fetchBusJejuRealtimePositions(
+  runtime: WorkerRuntime,
+  lineId: string | number,
+) {
+  return postBusJejuJson<BusJejuRealtimePosition[]>(
+    runtime,
+    "/data/search/getRealTimeBusPositionByLineId",
     {
       lineId,
       type: "2",

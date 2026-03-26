@@ -40,6 +40,7 @@ enum SessionStatus {
 }
 
 enum GeometrySourceKind {
+  BUS_JEJU_LINK
   GTFS
   OSM_RELATION
   GNSS_MATCHED
@@ -48,6 +49,7 @@ enum GeometrySourceKind {
 
 enum StopTimeSourceKind {
   OFFICIAL
+  OFFICIAL_ANCHOR_INTERPOLATED
   DISTANCE_INTERPOLATED
   SEGMENT_PROFILE
 }
@@ -123,6 +125,7 @@ model Stop {
   regionName        String
   latitude          Float
   longitude         Float
+  derivedStopTimes  DerivedStopTime[]
   translations      StopTranslation[]
   projections       RoutePatternStopProjection[]
   routePatternStops RoutePatternStop[]
@@ -174,7 +177,7 @@ model RoutePattern {
   stops            RoutePatternStop[]
   segmentProfiles  SegmentTravelProfile[]
   trips            Trip[]
-  vehicleDeviceMap VehicleDeviceMap?
+  vehicleDeviceMaps VehicleDeviceMap[]
 
   @@unique([externalRouteId, directionCode, waypointOrder])
 }
@@ -240,6 +243,7 @@ model Trip {
   routePattern      RoutePattern    @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
   scheduleSource    RoutePatternScheduleSource? @relation(fields: [scheduleSourceId], references: [id], onDelete: SetNull)
   serviceCalendar   ServiceCalendar @relation(fields: [serviceCalendarId], references: [id], onDelete: Cascade)
+  derivedStopTimes  DerivedStopTime[]
   stopTimes         StopTime[]
 
   @@index([scheduleSourceId])
@@ -278,6 +282,24 @@ model StopTime {
   @@index([stopId, departureMinutes])
 }
 
+model DerivedStopTime {
+  id                  String             @id @default(cuid())
+  tripId              String
+  stopId              String
+  sequence            Int
+  arrivalMinutes      Int
+  departureMinutes    Int
+  timeSource          StopTimeSourceKind @default(OFFICIAL_ANCHOR_INTERPOLATED)
+  confidence          Float              @default(0)
+  anchorStartSequence Int?
+  anchorEndSequence   Int?
+  trip                Trip               @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  stop                Stop               @relation(fields: [stopId], references: [id], onDelete: Cascade)
+
+  @@unique([tripId, sequence])
+  @@index([stopId, departureMinutes])
+}
+
 model WalkLink {
   id              String  @id @default(cuid())
   kind            String
@@ -302,12 +324,16 @@ model WalkLink {
 
 model VehicleDeviceMap {
   id              String       @id @default(cuid())
-  routePatternId  String       @unique
+  routePatternId  String
   deviceId        String
   externalRouteId String?
   confidence      Float        @default(1)
   refreshedAt     DateTime
   routePattern    RoutePattern @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+
+  @@unique([routePatternId, deviceId])
+  @@index([deviceId])
+  @@index([refreshedAt])
 }
 
 model GnssObservation {
@@ -363,6 +389,7 @@ model PlanQuery {
   id         String           @id @default(cuid())
   language   String
   startAt    DateTime
+  includeGeneratedTimes Boolean @default(false)
   preference PlanPreference?
   status     String           @default("READY")
   places     PlanQueryPlace[]

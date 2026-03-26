@@ -1,6 +1,5 @@
 import * as cheerio from "cheerio";
 import {
-  median,
   minutesToClock,
   normalizeText,
   parseClockToMinutes,
@@ -64,6 +63,10 @@ export type ParsedScheduleVariant = {
 export type ParsedScheduleTable = {
   stopNames: string[];
   variants: ParsedScheduleVariant[];
+  hasVariantColumn: boolean;
+  concreteVariantRowCount: number;
+  inheritedVariantRowCount: number;
+  unresolvedVariantRowCount: number;
 };
 
 function parseBusType(html: string) {
@@ -287,83 +290,6 @@ export function parseRouteDetailHtml(html: string, scheduleId: string): RouteDet
   };
 }
 
-function computeTypicalLegDurations(rows: Array<Array<number | null>>) {
-  if (rows.length === 0) {
-    return [];
-  }
-
-  const durations: number[] = [];
-
-  for (let index = 0; index < rows[0].length - 1; index += 1) {
-    const samples: number[] = [];
-    for (const row of rows) {
-      const current = row[index];
-      const next = row[index + 1];
-      if (current !== null && next !== null && next >= current) {
-        samples.push(next - current);
-      }
-    }
-
-    durations.push(median(samples) ?? 6);
-  }
-
-  return durations;
-}
-
-function fillScheduleRow(times: Array<number | null>, typicalDurations: number[]) {
-  const filled = [...times];
-  const estimated = new Set<number>();
-
-  const knownIndexes = filled
-    .map((value, index) => ({ value, index }))
-    .filter((item): item is { value: number; index: number } => item.value !== null);
-
-  if (knownIndexes.length === 0) {
-    return {
-      times: filled.map(() => null),
-      estimatedColumns: [],
-    };
-  }
-
-  const firstKnown = knownIndexes[0];
-  for (let index = firstKnown.index - 1; index >= 0; index -= 1) {
-    filled[index] = (filled[index + 1] ?? firstKnown.value) - (typicalDurations[index] ?? 6);
-    estimated.add(index);
-  }
-
-  for (let cursor = 0; cursor < knownIndexes.length - 1; cursor += 1) {
-    const start = knownIndexes[cursor];
-    const end = knownIndexes[cursor + 1];
-    if (end.index - start.index <= 1) {
-      continue;
-    }
-
-    let totalWeight = 0;
-    for (let index = start.index; index < end.index; index += 1) {
-      totalWeight += typicalDurations[index] ?? 6;
-    }
-
-    let accumulated = 0;
-    for (let index = start.index + 1; index < end.index; index += 1) {
-      accumulated += typicalDurations[index - 1] ?? 6;
-      const ratio = totalWeight === 0 ? 0 : accumulated / totalWeight;
-      filled[index] = Math.round(start.value + (end.value - start.value) * ratio);
-      estimated.add(index);
-    }
-  }
-
-  const lastKnown = knownIndexes[knownIndexes.length - 1];
-  for (let index = lastKnown.index + 1; index < filled.length; index += 1) {
-    filled[index] = (filled[index - 1] ?? lastKnown.value) + (typicalDurations[index - 1] ?? 6);
-    estimated.add(index);
-  }
-
-  return {
-    times: filled,
-    estimatedColumns: [...estimated.values()],
-  };
-}
-
 export function parseScheduleTableRows(rows: RawScheduleCell[]) {
   const grouped = new Map<number, Map<number, string | null>>();
 
@@ -380,6 +306,10 @@ export function parseScheduleTableRows(rows: RawScheduleCell[]) {
     return {
       stopNames: [],
       variants: [],
+      hasVariantColumn: false,
+      concreteVariantRowCount: 0,
+      inheritedVariantRowCount: 0,
+      unresolvedVariantRowCount: 0,
     } satisfies ParsedScheduleTable;
   }
 
@@ -400,30 +330,53 @@ export function parseScheduleTableRows(rows: RawScheduleCell[]) {
     .filter((column) => !column.isVariantColumn)
     .map((column) => column.columnSeq);
   const stopNames = stopColumns.map((columnSeq) => normalizeText(header.get(columnSeq)));
+  const hasVariantColumn = variantColumnSeq !== null;
+  let previousConcreteVariantKey: string | null = null;
+  let concreteVariantRowCount = 0;
+  let inheritedVariantRowCount = 0;
+  let unresolvedVariantRowCount = 0;
 
   const rawRows = [...grouped.entries()]
     .filter(([rowSeq]) => rowSeq > 0)
     .sort((left, right) => left[0] - right[0])
-    .map(([rowSeq, cells]) => ({
-      rowSequence: rowSeq,
-      rawVariantLabel:
+    .map(([rowSeq, cells]) => {
+      const rawVariantLabel =
         normalizeVariantLabel(variantColumnSeq === null ? null : cells.get(variantColumnSeq)) ||
-        "default",
-      rawValues: stopColumns.map((columnSeq) => normalizeText(cells.get(columnSeq)) || null),
-      times: stopColumns.map((columnSeq) => {
-        const value = cells.get(columnSeq);
-        return value ? parseClockToMinutes(value) : null;
-      }),
-    }));
+        "default";
+      const explicitVariantKey = hasVariantColumn
+        ? extractPrimaryRouteShortNameToken(rawVariantLabel)
+        : null;
+      const variantKey = explicitVariantKey
+        ? explicitVariantKey
+        : hasVariantColumn && previousConcreteVariantKey
+          ? previousConcreteVariantKey
+          : "default";
 
-  const typicalDurations = computeTypicalLegDurations(rawRows.map((row) => row.times));
+      if (explicitVariantKey) {
+        previousConcreteVariantKey = explicitVariantKey;
+        concreteVariantRowCount += 1;
+      } else if (hasVariantColumn && previousConcreteVariantKey) {
+        inheritedVariantRowCount += 1;
+      } else if (hasVariantColumn) {
+        unresolvedVariantRowCount += 1;
+      }
+
+      return {
+        rowSequence: rowSeq,
+        variantKey,
+        rawVariantLabel,
+        rawValues: stopColumns.map((columnSeq) => normalizeText(cells.get(columnSeq)) || null),
+        times: stopColumns.map((columnSeq) => {
+          const value = cells.get(columnSeq);
+          return value ? parseClockToMinutes(value) : null;
+        }),
+      };
+    });
   const variants = new Map<string, ParsedScheduleVariant>();
 
   for (const row of rawRows) {
-    const filled = fillScheduleRow(row.times, typicalDurations);
-    const variantKey = extractPrimaryRouteShortNameToken(row.rawVariantLabel) ?? "default";
-    const current = variants.get(variantKey) ?? {
-      variantKey,
+    const current = variants.get(row.variantKey) ?? {
+      variantKey: row.variantKey,
       rawVariantLabel: row.rawVariantLabel,
       trips: [],
     };
@@ -431,17 +384,24 @@ export function parseScheduleTableRows(rows: RawScheduleCell[]) {
     current.trips.push({
       rowLabel: row.rawVariantLabel,
       rowSequence: row.rowSequence,
-      variantKey,
+      variantKey: row.variantKey,
       rawVariantLabel: row.rawVariantLabel,
       rawValues: row.rawValues,
-      times: filled.times.map((value) => (value === null ? null : minutesToClock(value))),
-      estimatedColumns: filled.estimatedColumns,
+      times: row.times.map((value) => (value === null ? null : minutesToClock(value))),
+      estimatedColumns: [],
     });
-    variants.set(variantKey, current);
+    if (current.rawVariantLabel === "default" && row.rawVariantLabel !== "default") {
+      current.rawVariantLabel = row.rawVariantLabel;
+    }
+    variants.set(row.variantKey, current);
   }
 
   return {
     stopNames,
     variants: [...variants.values()],
+    hasVariantColumn,
+    concreteVariantRowCount,
+    inheritedVariantRowCount,
+    unresolvedVariantRowCount,
   } satisfies ParsedScheduleTable;
 }

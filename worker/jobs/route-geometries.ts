@@ -13,6 +13,7 @@ import {
 } from "@/lib/gtfs";
 import { matchTraceGeometry, getRouteGeometry } from "@/lib/osrm";
 import type { WorkerRuntime } from "@/worker/core/runtime";
+import { fetchBusJejuLinkInfo } from "@/worker/jobs/bus-jeju-live";
 import {
   chooseBestPatternMatch,
   type MatchableRoutePattern,
@@ -55,6 +56,31 @@ type GtfsShapeCandidate = MatchableRoutePattern & {
   shapeId: string;
   geometry: GeoPoint[];
 };
+
+function parseBusJejuLinkGeometry(
+  rows: Array<{
+    localX: string | number;
+    localY: string | number;
+  }>,
+) {
+  const geometry: GeoPoint[] = [];
+
+  for (const row of rows) {
+    const longitude = Number(row.localX);
+    const latitude = Number(row.localY);
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+      continue;
+    }
+
+    const point: GeoPoint = [longitude, latitude];
+    const previous = geometry[geometry.length - 1];
+    if (!previous || previous[0] !== point[0] || previous[1] !== point[1]) {
+      geometry.push(point);
+    }
+  }
+
+  return geometry;
+}
 
 async function loadRuntimeGtfsTextSet(runtime: WorkerRuntime) {
   const source = runtime.env.gtfsFeedUrl.trim() || runtime.env.gtfsShapesPath.trim();
@@ -296,6 +322,7 @@ export async function runRouteGeometriesJob(runtime: WorkerRuntime): Promise<Job
 
   let successCount = 0;
   let failureCount = 0;
+  let busJejuLinkCount = 0;
   let gtfsMatchCount = 0;
   let fallbackCount = 0;
 
@@ -324,9 +351,29 @@ export async function runRouteGeometriesJob(runtime: WorkerRuntime): Promise<Job
     let durationSeconds = 0;
     let nodes: number[] = [];
 
+    if (pattern.externalRouteId) {
+      try {
+        const linkRows = await fetchBusJejuLinkInfo(runtime, pattern.externalRouteId);
+        const linkGeometry = parseBusJejuLinkGeometry(linkRows);
+        if (linkGeometry.length >= 2) {
+          const matchedGeometry = await buildMatchedGeometry(runtime, linkGeometry);
+          sourceKind = GeometrySourceKind.BUS_JEJU_LINK;
+          shapeRef = String(pattern.externalRouteId);
+          confidence = matchedGeometry?.confidence ?? 0.95;
+          geometry = matchedGeometry?.geometry ?? linkGeometry;
+          lengthMeters = matchedGeometry?.lengthMeters ?? geometryLengthMeters(geometry);
+          durationSeconds = matchedGeometry?.durationSeconds ?? 0;
+          nodes = matchedGeometry?.nodes ?? [];
+          busJejuLinkCount += 1;
+        }
+      } catch {
+        // Fall through to GTFS or OSRM-derived geometry.
+      }
+    }
+
     if (gtfsMatch) {
       const candidate = gtfsCandidates.find((item) => item.id === gtfsMatch.patternId);
-      if (candidate) {
+      if (candidate && geometry.length < 2) {
         const matchedGeometry = await buildMatchedGeometry(runtime, candidate.geometry);
         sourceKind = GeometrySourceKind.GTFS;
         shapeRef = candidate.shapeId;
@@ -441,6 +488,7 @@ export async function runRouteGeometriesJob(runtime: WorkerRuntime): Promise<Job
       gtfsConfigured: Boolean(configuredGtfsSource),
       gtfsProbe,
       gtfsLoadError,
+      busJejuLinkCount,
       gtfsMatchCount,
       fallbackCount,
     },

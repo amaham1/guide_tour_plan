@@ -7,6 +7,7 @@ export const searchRequestSchema = z.object({
   kind: searchKindSchema,
   q: z.string().trim().min(1),
   limit: z.coerce.number().int().min(1).max(20).default(8),
+  includeGeneratedStops: z.coerce.boolean().default(false),
 });
 
 const dwellMinutesSchema = z.coerce.number().int().min(10).max(240);
@@ -40,6 +41,7 @@ export const planRequestSchema = z.object({
     .string()
     .trim()
     .refine((value) => !Number.isNaN(Date.parse(value)), "유효한 날짜여야 합니다."),
+  includeGeneratedTimes: z.coerce.boolean().default(false),
   preference: z.nativeEnum(PlanPreference).optional(),
   places: z.array(planPlaceInputSchema).min(2).max(5),
 });
@@ -55,6 +57,7 @@ export type PlannerStoredPlaceInput = z.infer<typeof storedPlanPlaceInputSchema>
 export type PlannerExternalPlaceInput = z.infer<typeof externalPlanPlaceInputSchema>;
 export type PlannerEngineInput = {
   startAt: string;
+  includeGeneratedTimes: boolean;
   places: Array<{
     placeId: string;
     dwellMinutes: number;
@@ -118,6 +121,7 @@ export type PlannerCandidateDto = {
 export type PlannerResultDto = {
   planId: string;
   startAt: string;
+  includeGeneratedTimes: boolean;
   preference?: PlanPreference;
   places: Array<{
     placeId: string;

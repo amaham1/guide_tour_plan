@@ -22,17 +22,17 @@ export async function POST(request: Request) {
 
     if (!body.jobKey) {
       return NextResponse.json(
-        { error: "jobKey 또는 runAll이 필요합니다." },
+        { error: "jobKey is required when runAll is false." },
         { status: 400 },
       );
     }
 
-    const result = await runJobByKey(body.jobKey, { triggeredBy: "admin" });
-    return NextResponse.json({ result });
+    const results = await runJobByKey(body.jobKey, { triggeredBy: "admin" });
+    return NextResponse.json({ results });
   } catch (error) {
     return NextResponse.json(
       {
-        error: getErrorMessage(error, "ingest 실행에 실패했습니다."),
+        error: getErrorMessage(error, "Ingest run failed."),
       },
       {
         status: getErrorStatus(error),

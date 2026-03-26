@@ -9,6 +9,7 @@ export async function GET(request: NextRequest) {
       kind: searchParams.get("kind"),
       q: searchParams.get("q"),
       limit: searchParams.get("limit") ?? undefined,
+      includeGeneratedStops: searchParams.get("includeGeneratedStops") ?? undefined,
     });
 
     return NextResponse.json({

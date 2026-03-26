@@ -26,7 +26,7 @@ export function RunAllButton() {
       }}
       className="rounded-2xl bg-ink px-4 py-3 text-sm font-semibold text-white transition hover:bg-lagoon disabled:cursor-wait disabled:bg-ink/40"
     >
-      {pending ? "전체 실행 중..." : "모든 잡 실행"}
+      {pending ? "Running all..." : "Run all jobs"}
     </button>
   );
 }

@@ -35,9 +35,6 @@ export async function runTransitAuditJob(runtime: WorkerRuntime): Promise<JobOut
     stopCount,
     routeGeometries,
     stopProjections,
-    segmentProfileCount,
-    segmentProfiles,
-    latestCustomizeJob,
   ] =
     await Promise.all([
       runtime.prisma.route.findMany({
@@ -84,21 +81,6 @@ export async function runTransitAuditJob(runtime: WorkerRuntime): Promise<JobOut
           sequence: true,
           offsetMeters: true,
           snapDistanceMeters: true,
-        },
-      }),
-      runtime.prisma.segmentTravelProfile.count(),
-      runtime.prisma.segmentTravelProfile.findMany({
-        distinct: ["routePatternId"],
-        select: {
-          routePatternId: true,
-        },
-      }),
-      runtime.prisma.ingestJob.findUnique({
-        where: {
-          key: "osrm-bus-customize",
-        },
-        select: {
-          lastSuccessfulAt: true,
         },
       }),
     ]);
@@ -195,7 +177,6 @@ export async function runTransitAuditJob(runtime: WorkerRuntime): Promise<JobOut
     acc[geometry.sourceKind] = (acc[geometry.sourceKind] ?? 0) + 1;
     return acc;
   }, {});
-  const segmentProfilePatternIds = new Set(segmentProfiles.map((profile) => profile.routePatternId));
   const patternStopMap = new Map<string, typeof activePatternStops>();
   for (const stop of activePatternStops) {
     const next = patternStopMap.get(stop.routePatternId) ?? [];
@@ -232,9 +213,6 @@ export async function runTransitAuditJob(runtime: WorkerRuntime): Promise<JobOut
             stopProjections.length,
         );
   const lowConfidenceGeometryCount = routeGeometries.filter((geometry) => geometry.confidence < 0.7).length;
-  const staleCustomize =
-    !latestCustomizeJob?.lastSuccessfulAt ||
-    Date.now() - latestCustomizeJob.lastSuccessfulAt.getTime() > 30 * 60 * 1000;
 
   return {
     processedCount: routes.length,
@@ -243,8 +221,7 @@ export async function runTransitAuditJob(runtime: WorkerRuntime): Promise<JobOut
       coverageGaps.length +
       lowConfidenceGeometryCount +
       placeholderDistancePatternCount +
-      projectionMonotonicFailureCount +
-      Number(staleCustomize),
+      projectionMonotonicFailureCount,
     meta: {
       stopCount,
       livePatternCount,
@@ -258,13 +235,6 @@ export async function runTransitAuditJob(runtime: WorkerRuntime): Promise<JobOut
       stopProjectionCoverage:
         activePatterns === 0 ? 0 : Math.round((projectionCoverageCount / activePatterns) * 100),
       meanSnapDistance,
-      segmentProfileCount,
-      segmentProfileCoverage:
-        activePatterns === 0
-          ? 0
-          : Math.round((segmentProfilePatternIds.size / activePatterns) * 100),
-      lastCustomizeAt: latestCustomizeJob?.lastSuccessfulAt?.toISOString() ?? null,
-      staleCustomize,
       lowConfidenceGeometryCount,
       placeholderDistancePatternCount,
       projectionMonotonicFailureCount,

@@ -8,7 +8,13 @@ export type SourceCatalogSeed = {
   officialUrl: string;
   guideUrl?: string;
   scheduleLabel: string;
+  isActive?: boolean;
 };
+
+export const GNSS_DERIVED_DISABLED_JOB_KEYS = [
+  "segment-profiles",
+  "osrm-bus-customize",
+] as const;
 
 export const sourceCatalog: SourceCatalogSeed[] = [
   {
@@ -68,7 +74,7 @@ export const sourceCatalog: SourceCatalogSeed[] = [
   {
     key: "route-geometries",
     name: "Route geometries",
-    description: "Builds canonical route geometries and stop projections from GTFS shapes with OSRM fallbacks.",
+    description: "Builds canonical route geometries and stop projections from Jeju BIS link geometry, with GTFS and OSRM fallbacks.",
     sourceKind: "FILE_DATA",
     officialUrl: "https://gtfs.org",
     guideUrl: "https://gtfs.org/documentation/schedule/reference/#shapestxt",
@@ -77,7 +83,8 @@ export const sourceCatalog: SourceCatalogSeed[] = [
   {
     key: "timetables-xlsx",
     name: "Timetable expansion",
-    description: "Builds trips and stop times from schedule tables on top of authoritative patterns.",
+    description:
+      "Builds sparse official trips from schedule tables and stores anchor-bounded generated stop times separately.",
     sourceKind: "FILE_DATA",
     officialUrl: "https://bus.jeju.go.kr",
     guideUrl: "https://bus.jeju.go.kr/mobile/schedule/listSchedule",
@@ -86,7 +93,7 @@ export const sourceCatalog: SourceCatalogSeed[] = [
   {
     key: "vehicle-device-map",
     name: "Vehicle Device Map",
-    description: "Maps realtime vehicle devices onto planner route patterns.",
+    description: "Maps realtime vehicle devices onto planner route patterns from an override source or Jeju BIS live positions.",
     sourceKind: "OPEN_API",
     officialUrl: "https://www.data.go.kr",
     guideUrl: "https://www.data.go.kr",
@@ -95,7 +102,7 @@ export const sourceCatalog: SourceCatalogSeed[] = [
   {
     key: "gnss-history",
     name: "GNSS raw history",
-    description: "Captures raw GNSS snapshots for segment travel profiling.",
+    description: "Captures raw GNSS snapshots for future analysis and validation.",
     sourceKind: "OPEN_API",
     officialUrl: "https://www.data.go.kr",
     guideUrl: "https://www.data.go.kr",
@@ -108,7 +115,8 @@ export const sourceCatalog: SourceCatalogSeed[] = [
     sourceKind: "INTERNAL_JOB",
     officialUrl: "https://project-osrm.org",
     guideUrl: "https://project-osrm.org/docs",
-    scheduleLabel: "Every 15 minutes",
+    scheduleLabel: "Disabled",
+    isActive: false,
   },
   {
     key: "osrm-bus-customize",
@@ -117,7 +125,8 @@ export const sourceCatalog: SourceCatalogSeed[] = [
     sourceKind: "INTERNAL_JOB",
     officialUrl: "https://project-osrm.org",
     guideUrl: "https://project-osrm.org/docs",
-    scheduleLabel: "Every 15 minutes",
+    scheduleLabel: "Disabled",
+    isActive: false,
   },
   {
     key: "walk-links",
@@ -149,7 +158,7 @@ export async function syncSourceCatalog(prisma: PrismaClient) {
         sourceKind: source.sourceKind,
         officialUrl: source.officialUrl,
         guideUrl: source.guideUrl,
-        isActive: true,
+        isActive: source.isActive ?? true,
       },
       create: {
         key: source.key,
@@ -158,7 +167,7 @@ export async function syncSourceCatalog(prisma: PrismaClient) {
         sourceKind: source.sourceKind,
         officialUrl: source.officialUrl,
         guideUrl: source.guideUrl,
-        isActive: true,
+        isActive: source.isActive ?? true,
       },
     });
 
@@ -168,14 +177,14 @@ export async function syncSourceCatalog(prisma: PrismaClient) {
         name: source.name,
         scheduleLabel: source.scheduleLabel,
         sourceId: dataSource.id,
-        isActive: true,
+        isActive: source.isActive ?? true,
       },
       create: {
         key: source.key,
         name: source.name,
         scheduleLabel: source.scheduleLabel,
         sourceId: dataSource.id,
-        isActive: true,
+        isActive: source.isActive ?? true,
       },
     });
   }

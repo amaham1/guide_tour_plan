@@ -1,6 +1,27 @@
+import type { Prisma } from "@prisma/client";
 import { fetchGnssRecords, toTimestamp } from "@/features/planner/realtime-source";
+import { fetchBusJejuRealtimePositions } from "@/worker/jobs/bus-jeju-live";
 import type { WorkerRuntime } from "@/worker/core/runtime";
+import { normalizeText, toNumber } from "@/worker/jobs/helpers";
 import type { JobOutcome } from "@/worker/jobs/types";
+
+const BUS_JEJU_GNSS_FALLBACK_CONCURRENCY = 12;
+
+type GnssSnapshotRow = {
+  deviceId: string;
+  latitude: number;
+  longitude: number;
+  time: string;
+  raw?: Record<string, unknown>;
+};
+
+type NormalizedObservation = {
+  deviceId: string;
+  observedAt: Date;
+  latitude: number;
+  longitude: number;
+  raw: Record<string, unknown>;
+};
 
 function buildObservationKey(item: {
   deviceId: string;
@@ -11,34 +32,142 @@ function buildObservationKey(item: {
   return `${item.deviceId}:${item.observedAt.toISOString()}:${item.latitude.toFixed(6)}:${item.longitude.toFixed(6)}`;
 }
 
-export async function runGnssHistoryJob(runtime: WorkerRuntime): Promise<JobOutcome> {
-  if (!runtime.env.dataGoKrServiceKey) {
-    throw new Error("DATA_GO_KR_SERVICE_KEY is required for gnss-history.");
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T) => Promise<R>,
+) {
+  const results: R[] = [];
+  for (let index = 0; index < items.length; index += limit) {
+    const chunk = items.slice(index, index + limit);
+    const resolved = await Promise.all(chunk.map((item) => mapper(item)));
+    results.push(...resolved);
   }
 
-  const rows = await fetchGnssRecords(runtime.env.dataGoKrServiceKey);
-  const normalized = rows
-    .map((row) => ({
+  return results;
+}
+
+async function fetchBusJejuGnssFallback(runtime: WorkerRuntime) {
+  const mappedPatterns = await runtime.prisma.vehicleDeviceMap.findMany({
+    where: {
+      externalRouteId: {
+        not: null,
+      },
+    },
+    select: {
+      externalRouteId: true,
+    },
+    distinct: ["externalRouteId"],
+  });
+  const externalRouteIds = mappedPatterns
+    .map((item) => normalizeText(item.externalRouteId))
+    .filter(Boolean);
+  const observedAt = new Date();
+
+  if (externalRouteIds.length === 0) {
+    return {
+      source: "BUS_JEJU_REALTIME",
+      rows: [] as GnssSnapshotRow[],
+      externalRouteCount: 0,
+    };
+  }
+
+  const groups = await mapWithConcurrency(
+    externalRouteIds,
+    BUS_JEJU_GNSS_FALLBACK_CONCURRENCY,
+    async (externalRouteId) => {
+      try {
+        const rows = await fetchBusJejuRealtimePositions(runtime, externalRouteId);
+        const normalized: GnssSnapshotRow[] = [];
+
+        for (const row of rows) {
+          const deviceId = normalizeText(row.vhId);
+          const latitude = toNumber(row.localY);
+          const longitude = toNumber(row.localX);
+
+          if (!deviceId || latitude === null || longitude === null) {
+            continue;
+          }
+
+          normalized.push({
+            deviceId,
+            latitude,
+            longitude,
+            time: observedAt.toISOString(),
+            raw: {
+              ...row,
+              source: "BUS_JEJU_REALTIME",
+              externalRouteId,
+            },
+          });
+        }
+
+        return normalized;
+      } catch {
+        return [] as GnssSnapshotRow[];
+      }
+    },
+  );
+
+  return {
+    source: "BUS_JEJU_REALTIME",
+    rows: groups.flat(),
+    externalRouteCount: externalRouteIds.length,
+  };
+}
+
+function toRawPayload(row: GnssSnapshotRow) {
+  return (
+    row.raw ?? {
       deviceId: row.deviceId,
-      observedAt: toTimestamp(row.time),
       latitude: row.latitude,
       longitude: row.longitude,
-      raw: row,
-    }))
-    .filter(
-      (
-        row,
-      ): row is {
-        deviceId: string;
-        observedAt: Date;
-        latitude: number;
-        longitude: number;
-        raw: typeof rows[number];
-      } =>
-        row.observedAt !== null &&
-        row.latitude !== 0 &&
-        row.longitude !== 0,
-    );
+      time: row.time,
+    }
+  );
+}
+
+function normalizeObservation(row: GnssSnapshotRow): NormalizedObservation | null {
+  const observedAt = toTimestamp(row.time);
+  if (!observedAt || row.latitude === 0 || row.longitude === 0) {
+    return null;
+  }
+
+  return {
+    deviceId: row.deviceId,
+    observedAt,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    raw: toRawPayload(row),
+  };
+}
+
+export async function runGnssHistoryJob(runtime: WorkerRuntime): Promise<JobOutcome> {
+  let rows: GnssSnapshotRow[] = [];
+  let source = "DATA_GO_KR_GNSS";
+  let fallbackReason: string | null = null;
+  let fallbackExternalRouteCount = 0;
+
+  if (runtime.env.dataGoKrServiceKey) {
+    try {
+      rows = await fetchGnssRecords(runtime.env.dataGoKrServiceKey);
+    } catch (error) {
+      fallbackReason = error instanceof Error ? error.message : "GNSS_REQUEST_FAILED";
+    }
+  } else {
+    fallbackReason = "DATA_GO_KR_SERVICE_KEY_MISSING";
+  }
+
+  if (rows.length === 0) {
+    const fallback = await fetchBusJejuGnssFallback(runtime);
+    rows = fallback.rows;
+    source = fallback.source;
+    fallbackExternalRouteCount = fallback.externalRouteCount;
+  }
+
+  const normalized = rows
+    .map((row) => normalizeObservation(row))
+    .filter((row): row is NormalizedObservation => row !== null);
 
   if (normalized.length === 0) {
     return {
@@ -47,6 +176,9 @@ export async function runGnssHistoryJob(runtime: WorkerRuntime): Promise<JobOutc
       failureCount: 0,
       meta: {
         inserted: 0,
+        source,
+        fallbackReason,
+        fallbackExternalRouteCount,
       },
     };
   }
@@ -78,7 +210,7 @@ export async function runGnssHistoryJob(runtime: WorkerRuntime): Promise<JobOutc
     },
   });
   const existingKeys = new Set(existing.map(buildObservationKey));
-  const deduped = new Map<string, (typeof normalized)[number]>();
+  const deduped = new Map<string, NormalizedObservation>();
 
   for (const row of normalized) {
     const key = buildObservationKey(row);
@@ -97,7 +229,7 @@ export async function runGnssHistoryJob(runtime: WorkerRuntime): Promise<JobOutc
         observedAt: row.observedAt,
         latitude: row.latitude,
         longitude: row.longitude,
-        raw: row.raw,
+        raw: row.raw as Prisma.InputJsonValue,
       })),
     });
   }
@@ -109,6 +241,9 @@ export async function runGnssHistoryJob(runtime: WorkerRuntime): Promise<JobOutc
     meta: {
       inserted: insertRows.length,
       skippedDuplicates: normalized.length - insertRows.length,
+      source,
+      fallbackReason,
+      fallbackExternalRouteCount,
       observedAtRange: {
         from: earliest.toISOString(),
         to: latest.toISOString(),

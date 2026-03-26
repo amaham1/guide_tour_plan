@@ -82,7 +82,7 @@ function parseJson<T>(value: Prisma.JsonValue): T {
 }
 
 function plannerFallbackMessage() {
-  return "선택한 순서대로 오늘 연결 가능한 버스를 찾지 못했습니다. 시작 시각이나 장소 순서를 바꿔 다시 시도해 주세요.";
+  return "선택한 순서로 오늘 연결 가능한 버스를 찾지 못했습니다. 시작 시각이나 장소 순서를 바꿔 다시 시도해 주세요.";
 }
 
 function mergeWarnings(...sets: CandidateWarning[][]) {
@@ -146,6 +146,150 @@ function buildPlanQueryPlaceId(
   }
 
   return `${place.externalProvider ?? "external"}:${place.externalRef ?? place.sequence}`;
+}
+
+function isAuthoritativeTrip(
+  patternStops: Array<{
+    sequence: number;
+    stop: {
+      id: string;
+    };
+  }>,
+  trip: {
+    scheduleSource: {
+      isActive: boolean;
+    } | null;
+    stopTimes: Array<{
+      stopId: string;
+      sequence: number;
+      isEstimated: boolean;
+    }>;
+  },
+) {
+  if (!trip.scheduleSource?.isActive || trip.stopTimes.length !== patternStops.length) {
+    return false;
+  }
+
+  return trip.stopTimes.every((stopTime, index) => {
+    const patternStop = patternStops[index];
+    return (
+      !stopTime.isEstimated &&
+      stopTime.sequence === index + 1 &&
+      patternStop?.sequence === index + 1 &&
+      patternStop.stop.id === stopTime.stopId
+    );
+  });
+}
+
+function isUsableDerivedTrip(
+  patternStops: Array<{
+    sequence: number;
+    stop: {
+      id: string;
+    };
+  }>,
+  trip: {
+    scheduleSource: {
+      isActive: boolean;
+    } | null;
+    stopTimes: Array<{
+      stopId: string;
+      sequence: number;
+    }>;
+  },
+) {
+  if (!trip.scheduleSource?.isActive || trip.stopTimes.length < 2) {
+    return false;
+  }
+
+  const patternStopBySequence = new Map(
+    patternStops.map((patternStop) => [patternStop.sequence, patternStop.stop.id]),
+  );
+
+  return trip.stopTimes.every((stopTime, index) => {
+    const expectedStopId = patternStopBySequence.get(stopTime.sequence);
+    const previousStopTime = index > 0 ? trip.stopTimes[index - 1] : null;
+    return (
+      expectedStopId === stopTime.stopId &&
+      (previousStopTime === null || stopTime.sequence > previousStopTime.sequence)
+    );
+  });
+}
+
+function buildDerivedRoutingKey(
+  routePatternId: string,
+  stopTimes: Array<{
+    stopId: string;
+    sequence: number;
+  }>,
+) {
+  return `${routePatternId}:derived:${stopTimes
+    .map((stopTime) => `${stopTime.stopId}:${stopTime.sequence}`)
+    .join(">")}`;
+}
+
+function plannerFallbackMessageForStatus(options?: {
+  includeGeneratedTimes?: boolean;
+  generatedAlternativeAvailable?: boolean;
+}) {
+  if (options?.generatedAlternativeAvailable && !options.includeGeneratedTimes) {
+    return "공식 시간표만으로는 연결 가능한 경로를 찾지 못했습니다. `생성 시각 포함`을 켜면 더 많은 경로를 볼 수 있습니다.";
+  }
+
+  return "선택한 순서로 오늘 연결 가능한 버스를 찾지 못했습니다. 시작 시각이나 장소 순서를 바꿔 다시 시도해 주세요.";
+}
+
+function isUsableSparseOfficialTrip(
+  patternStops: Array<{ sequence: number; stop: { id: string } }>,
+  trip: {
+    scheduleSource: { isActive: boolean } | null;
+    stopTimes: Array<{ stopId: string; sequence: number; isEstimated: boolean }>;
+  },
+) {
+  if (!trip.scheduleSource?.isActive || trip.stopTimes.length < 2) {
+    return false;
+  }
+
+  const patternStopBySequence = new Map(
+    patternStops.map((patternStop) => [patternStop.sequence, patternStop.stop.id]),
+  );
+
+  return trip.stopTimes.every((stopTime, index) => {
+    const expectedStopId = patternStopBySequence.get(stopTime.sequence);
+    const previousStopTime = index > 0 ? trip.stopTimes[index - 1] : null;
+    return (
+      !stopTime.isEstimated &&
+      expectedStopId === stopTime.stopId &&
+      (previousStopTime === null || stopTime.sequence > previousStopTime.sequence)
+    );
+  });
+}
+
+function isUsableGeneratedStopTimes(
+  patternStops: Array<{ sequence: number; stop: { id: string } }>,
+  stopTimes: Array<{ stopId: string; sequence: number }>,
+) {
+  const patternStopBySequence = new Map(
+    patternStops.map((patternStop) => [patternStop.sequence, patternStop.stop.id]),
+  );
+
+  return stopTimes.every((stopTime, index) => {
+    const expectedStopId = patternStopBySequence.get(stopTime.sequence);
+    const previousStopTime = index > 0 ? stopTimes[index - 1] : null;
+    return (
+      expectedStopId === stopTime.stopId &&
+      (previousStopTime === null || stopTime.sequence > previousStopTime.sequence)
+    );
+  });
+}
+
+function buildTripRoutingKey(
+  routePatternId: string,
+  stopTimes: Array<{ stopId: string; sequence: number }>,
+) {
+  return `${routePatternId}:stops:${stopTimes
+    .map((stopTime) => `${stopTime.stopId}:${stopTime.sequence}`)
+    .join(">")}`;
 }
 
 async function searchStoredPlaces(
@@ -259,7 +403,7 @@ async function measurePlaceStopLinks(
   const reachableLinks = measured.filter((link): link is DynamicStopLink => link !== null);
   if (reachableLinks.length === 0) {
     throw new RouteNotFoundError(
-      `${anchor.displayName} 인근에서 도보로 연결 가능한 정류장을 찾지 못했습니다.`,
+      `${anchor.displayName} 근처에서 버스로 연결 가능한 정류장을 찾지 못했습니다.`,
     );
   }
 
@@ -322,6 +466,7 @@ async function buildDynamicPlaceLinks(
 async function loadPlannerGraph(
   prisma: PrismaClient,
   anchors: PlannerAnchor[],
+  includeGeneratedTimes: boolean,
 ): Promise<PlannerGraphContext> {
   const [stops, stopTransfers, patterns] = await Promise.all([
     prisma.stop.findMany(),
@@ -333,16 +478,58 @@ async function loadPlannerGraph(
     prisma.routePattern.findMany({
       where: {
         isActive: true,
+        route: {
+          isActive: true,
+        },
         trips: {
-          some: {},
+          some: {
+            scheduleSource: {
+              is: {
+                isActive: true,
+              },
+            },
+            stopTimes: {
+              some: {},
+            },
+          },
         },
       },
       include: {
         route: true,
-        vehicleDeviceMap: true,
-        trips: {
+        stops: {
+          orderBy: {
+            sequence: "asc",
+          },
           include: {
+            stop: true,
+          },
+        },
+        trips: {
+          where: {
+            scheduleSource: {
+              is: {
+                isActive: true,
+              },
+            },
             stopTimes: {
+              some: {},
+            },
+          },
+          include: {
+            scheduleSource: {
+              select: {
+                isActive: true,
+              },
+            },
+            stopTimes: {
+              orderBy: {
+                sequence: "asc",
+              },
+              include: {
+                stop: true,
+              },
+            },
+            derivedStopTimes: {
               orderBy: {
                 sequence: "asc",
               },
@@ -417,34 +604,80 @@ async function loadPlannerGraph(
   }
 
   const realtimePatternIds = new Set<string>();
-  const trips = patterns.flatMap((pattern) => {
-    if (pattern.vehicleDeviceMap) {
-      realtimePatternIds.add(pattern.id);
-    }
+  const trips = patterns.flatMap((pattern) =>
+    pattern.trips.flatMap((trip) => {
+      if (!isUsableSparseOfficialTrip(pattern.stops, trip)) {
+        return [];
+      }
 
-    return pattern.trips.map((trip) => {
-      const normalizedStopTimes = trip.stopTimes.map((stopTime) => ({
-        stopId: stopTime.stopId,
-        stopName: stopTime.stop.displayName,
-        sequence: stopTime.sequence,
-        arrivalMinutes: stopTime.arrivalMinutes,
-        departureMinutes: stopTime.departureMinutes,
-        isEstimated: stopTime.isEstimated,
-      }));
+      const mergedStopTimes = new Map<
+        number,
+        {
+          stopId: string;
+          stopName: string;
+          sequence: number;
+          arrivalMinutes: number;
+          departureMinutes: number;
+          isEstimated: boolean;
+        }
+      >();
 
-      return {
-        id: trip.id,
-        routePatternId: pattern.id,
-        routeShortName: pattern.route.shortName,
-        routeDisplayName: pattern.route.displayName,
-        headsign: trip.headsign,
-        stopTimes: normalizedStopTimes,
-        stopTimeByStopId: new Map(
-          normalizedStopTimes.map((stopTime) => [stopTime.stopId, stopTime]),
-        ),
-      };
-    });
-  });
+      for (const stopTime of trip.stopTimes) {
+        mergedStopTimes.set(stopTime.sequence, {
+          stopId: stopTime.stopId,
+          stopName: stopTime.stop.displayName,
+          sequence: stopTime.sequence,
+          arrivalMinutes: stopTime.arrivalMinutes,
+          departureMinutes: stopTime.departureMinutes,
+          isEstimated: false,
+        });
+      }
+
+      if (
+        includeGeneratedTimes &&
+        trip.derivedStopTimes.length > 0 &&
+        isUsableGeneratedStopTimes(pattern.stops, trip.derivedStopTimes)
+      ) {
+        for (const stopTime of trip.derivedStopTimes) {
+          if (mergedStopTimes.has(stopTime.sequence)) {
+            continue;
+          }
+
+          mergedStopTimes.set(stopTime.sequence, {
+            stopId: stopTime.stopId,
+            stopName: stopTime.stop.displayName,
+            sequence: stopTime.sequence,
+            arrivalMinutes: stopTime.arrivalMinutes,
+            departureMinutes: stopTime.departureMinutes,
+            isEstimated: true,
+          });
+        }
+      }
+
+      const normalizedStopTimes = [...mergedStopTimes.values()].sort(
+        (left, right) => left.sequence - right.sequence,
+      );
+
+      if (normalizedStopTimes.length < 2) {
+        return [];
+      }
+
+      return [
+        {
+          id: trip.id,
+          routingKey: buildTripRoutingKey(pattern.id, normalizedStopTimes),
+          routePatternId: pattern.id,
+          routeShortName: pattern.route.shortName,
+          routeDisplayName: pattern.route.displayName,
+          headsign: trip.headsign,
+          stopTimes: normalizedStopTimes,
+          stopTimeByStopId: new Map(
+            normalizedStopTimes.map((stopTime) => [stopTime.stopId, stopTime]),
+          ),
+        },
+      ];
+    }),
+  );
 
   return {
     places: placeMap,
@@ -535,9 +768,10 @@ async function resolvePlannerAnchors(
 
   return {
     anchors,
-    buildEngineInput(startAt: string) {
+    buildEngineInput(startAt: string, includeGeneratedTimes: boolean) {
       return {
         startAt,
+        includeGeneratedTimes,
         places: anchors.map((anchor) => ({
           placeId: anchor.id,
           dwellMinutes: anchor.dwellMinutes,
@@ -558,18 +792,70 @@ export async function searchCatalog(rawInput: unknown) {
   const stops = await db.stop.findMany({
     where: {
       AND: [
-        {
-          routePatternStops: {
-            some: {
-              routePattern: {
-                isActive: true,
-                trips: {
-                  some: {},
+        input.includeGeneratedStops
+          ? {
+              OR: [
+                {
+                  stopTimes: {
+                    some: {
+                      isEstimated: false,
+                      trip: {
+                        routePattern: {
+                          isActive: true,
+                          route: {
+                            isActive: true,
+                          },
+                        },
+                        scheduleSource: {
+                          is: {
+                            isActive: true,
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+                {
+                  derivedStopTimes: {
+                    some: {
+                      trip: {
+                        routePattern: {
+                          isActive: true,
+                          route: {
+                            isActive: true,
+                          },
+                        },
+                        scheduleSource: {
+                          is: {
+                            isActive: true,
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              ],
+            }
+          : {
+              stopTimes: {
+                some: {
+                  isEstimated: false,
+                  trip: {
+                    routePattern: {
+                      isActive: true,
+                      route: {
+                        isActive: true,
+                      },
+                    },
+                    scheduleSource: {
+                      is: {
+                        isActive: true,
+                      },
+                    },
+                  },
                 },
               },
             },
-          },
-        },
         {
           OR: [
             { displayName: { contains: input.q } },
@@ -580,6 +866,43 @@ export async function searchCatalog(rawInput: unknown) {
     },
     include: {
       translations: true,
+      stopTimes: {
+        where: {
+          isEstimated: false,
+          trip: {
+            routePattern: {
+              isActive: true,
+              route: {
+                isActive: true,
+              },
+            },
+            scheduleSource: {
+              is: {
+                isActive: true,
+              },
+            },
+          },
+        },
+        take: 1,
+      },
+      derivedStopTimes: {
+        where: {
+          trip: {
+            routePattern: {
+              isActive: true,
+              route: {
+                isActive: true,
+              },
+            },
+            scheduleSource: {
+              is: {
+                isActive: true,
+              },
+            },
+          },
+        },
+        take: 1,
+      },
     },
     orderBy: {
       displayName: "asc",
@@ -587,19 +910,29 @@ export async function searchCatalog(rawInput: unknown) {
     take: input.limit,
   });
 
-  return stops.map<SearchResultDto>((stop) => ({
-    id: stop.id,
-    kind: "stop",
-    displayName: stop.displayName,
-    categoryLabel: "정류장",
-    regionName: stop.regionName,
-    latitude: stop.latitude,
-    longitude: stop.longitude,
-    meta: {
-      stopId: stop.id,
-      translations: stop.translations.length,
-    },
-  }));
+  return stops.map<SearchResultDto>((stop) => {
+    const hasOfficial = stop.stopTimes.length > 0;
+    const hasGenerated = stop.derivedStopTimes.length > 0;
+
+    return {
+      id: stop.id,
+      kind: "stop",
+      displayName: stop.displayName,
+      categoryLabel: "정류장",
+      regionName: stop.regionName,
+      latitude: stop.latitude,
+      longitude: stop.longitude,
+      meta: {
+        stopId: stop.id,
+        translations: stop.translations.length,
+        coverage: hasOfficial
+          ? hasGenerated
+            ? "mixed"
+            : "official"
+          : "generated_only",
+      },
+    };
+  });
 }
 
 export async function createPlannerResult(rawInput: unknown): Promise<PlannerResultDto> {
@@ -608,7 +941,7 @@ export async function createPlannerResult(rawInput: unknown): Promise<PlannerRes
 
   const uniquePlaces = new Set(input.places.map(buildPlaceDedupKey));
   if (uniquePlaces.size !== input.places.length) {
-    throw new InvalidRequestError("같은 장소를 중복해서 선택할 수 없습니다.");
+    throw new InvalidRequestError("같은 장소를 중복해서 선택할 수는 없습니다.");
   }
 
   const { anchors, buildEngineInput } = await resolvePlannerAnchors(
@@ -621,6 +954,7 @@ export async function createPlannerResult(rawInput: unknown): Promise<PlannerRes
     data: {
       language: input.language,
       startAt: new Date(input.startAt),
+      includeGeneratedTimes: input.includeGeneratedTimes,
       preference: input.preference,
       status: "READY",
       places: {
@@ -640,9 +974,10 @@ export async function createPlannerResult(rawInput: unknown): Promise<PlannerRes
     },
   });
 
-  const graph = await loadPlannerGraph(db, anchors);
-  const engineInput = buildEngineInput(input.startAt);
+  const graph = await loadPlannerGraph(db, anchors, input.includeGeneratedTimes);
+  const engineInput = buildEngineInput(input.startAt, input.includeGeneratedTimes);
   const candidates = buildPlannerCandidates(planQuery.id, engineInput, graph);
+  let generatedAlternativeAvailable = false;
 
   for (const candidate of candidates) {
     const openingWarnings = buildOpeningHoursWarnings(graph.places, candidate.legs);
@@ -660,10 +995,25 @@ export async function createPlannerResult(rawInput: unknown): Promise<PlannerRes
     });
   }
 
+  if (candidates.length === 0 && !input.includeGeneratedTimes) {
+    const previewGraph = await loadPlannerGraph(db, anchors, true);
+    const previewCandidates = buildPlannerCandidates(
+      planQuery.id,
+      buildEngineInput(input.startAt, true),
+      previewGraph,
+    );
+    generatedAlternativeAvailable = previewCandidates.length > 0;
+  }
+
   await db.planQuery.update({
     where: { id: planQuery.id },
     data: {
-      status: candidates.length > 0 ? "COMPUTED" : "NO_ROUTE",
+      status:
+        candidates.length > 0
+          ? "COMPUTED"
+          : generatedAlternativeAvailable
+            ? "NO_ROUTE_GENERATED_AVAILABLE"
+            : "NO_ROUTE",
     },
   });
 
@@ -701,6 +1051,7 @@ export async function getPlannerResult(planId: string): Promise<PlannerResultDto
   return {
     planId: planQuery.id,
     startAt: planQuery.startAt.toISOString(),
+    includeGeneratedTimes: planQuery.includeGeneratedTimes,
     preference: planQuery.preference ?? undefined,
     places: planQuery.places.map((place) => ({
       placeId: buildPlanQueryPlaceId(place),
@@ -711,7 +1062,13 @@ export async function getPlannerResult(planId: string): Promise<PlannerResultDto
     })),
     candidates: planQuery.candidates.map(toPlannerCandidateDto),
     fallbackMessage:
-      planQuery.candidates.length === 0 ? plannerFallbackMessage() : undefined,
+      planQuery.candidates.length === 0
+        ? plannerFallbackMessageForStatus({
+            includeGeneratedTimes: planQuery.includeGeneratedTimes,
+            generatedAlternativeAvailable:
+              planQuery.status === "NO_ROUTE_GENERATED_AVAILABLE",
+          })
+        : undefined,
   };
 }
 
@@ -884,38 +1241,8 @@ export async function getExecutionSessionStatus(
     legs: CandidateLeg[];
   }>(session.snapshot);
 
-  const routePatternIds = snapshot.legs.flatMap((leg) =>
-    leg.routePatternId ? [leg.routePatternId] : [],
-  );
-  const mappedPatterns = await db.vehicleDeviceMap.findMany({
-    where: {
-      routePatternId: {
-        in: routePatternIds,
-      },
-    },
-  });
-  const vehicleMap = new Map(
-    mappedPatterns.map((item) => [
-      item.routePatternId,
-      {
-        deviceId: item.deviceId,
-        routePatternId: item.routePatternId,
-        externalRouteId: item.externalRouteId,
-      },
-    ]),
-  );
-
   const now = new Date();
-  const provisional = buildExecutionStatus(session.id, snapshot, {}, now);
-  const realtimeSignal = await resolveRealtimeSignal(provisional, vehicleMap, db, now);
-  const status = buildExecutionStatus(
-    session.id,
-    snapshot,
-    {
-      realtime: realtimeSignal,
-    },
-    now,
-  );
+  const status = buildExecutionStatus(session.id, snapshot, {}, now);
 
   await db.executionSession.update({
     where: { id: session.id },

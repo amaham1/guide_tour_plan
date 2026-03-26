@@ -81,7 +81,7 @@ describe("bus jeju parser", () => {
     expect(parsed.effectiveDate?.getDate()).toBe(1);
   });
 
-  it("groups timetable rows by route variant and keeps raw labels", () => {
+  it("groups timetable rows by route variant and preserves missing official times", () => {
     const parsed = parseScheduleTableRows([
       { ROW_SEQ: 0, COLUMN_SEQ: 1, COLUMN_NM: "노선번호" },
       { ROW_SEQ: 0, COLUMN_SEQ: 2, COLUMN_NM: "Airport" },
@@ -110,8 +110,63 @@ describe("bus jeju parser", () => {
         },
       ],
     });
-    expect(parsed.variants[1]?.trips[0]?.times).toEqual(["07:00", "07:12", "07:35"]);
-    expect(parsed.variants[1]?.trips[0]?.estimatedColumns).toContain(1);
+    expect(parsed.variants[1]?.trips[0]?.times).toEqual(["07:00", null, "07:35"]);
+    expect(parsed.variants[1]?.trips[0]?.estimatedColumns).toEqual([]);
+  });
+
+  it("inherits blank variant rows from the previous explicit route label", () => {
+    const parsed = parseScheduleTableRows([
+      { ROW_SEQ: 0, COLUMN_SEQ: 1, COLUMN_NM: "노선번호" },
+      { ROW_SEQ: 0, COLUMN_SEQ: 2, COLUMN_NM: "Origin" },
+      { ROW_SEQ: 0, COLUMN_SEQ: 3, COLUMN_NM: "Destination" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 1, COLUMN_NM: "211" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 2, COLUMN_NM: "06:00" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 3, COLUMN_NM: "06:20" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 1, COLUMN_NM: "" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 2, COLUMN_NM: "07:00" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 3, COLUMN_NM: "07:20" },
+      { ROW_SEQ: 3, COLUMN_SEQ: 1, COLUMN_NM: "212" },
+      { ROW_SEQ: 3, COLUMN_SEQ: 2, COLUMN_NM: "08:00" },
+      { ROW_SEQ: 3, COLUMN_SEQ: 3, COLUMN_NM: "08:20" },
+    ]);
+
+    expect(parsed.hasVariantColumn).toBe(true);
+    expect(parsed.concreteVariantRowCount).toBe(2);
+    expect(parsed.inheritedVariantRowCount).toBe(1);
+    expect(parsed.unresolvedVariantRowCount).toBe(0);
+    expect(parsed.variants).toEqual([
+      expect.objectContaining({
+        variantKey: "211",
+        trips: [
+          expect.objectContaining({ rowSequence: 1, variantKey: "211" }),
+          expect.objectContaining({ rowSequence: 2, variantKey: "211" }),
+        ],
+      }),
+      expect.objectContaining({
+        variantKey: "212",
+        trips: [expect.objectContaining({ rowSequence: 3, variantKey: "212" })],
+      }),
+    ]);
+  });
+
+  it("marks blank leading variant rows as unresolved in mixed tables", () => {
+    const parsed = parseScheduleTableRows([
+      { ROW_SEQ: 0, COLUMN_SEQ: 1, COLUMN_NM: "노선번호" },
+      { ROW_SEQ: 0, COLUMN_SEQ: 2, COLUMN_NM: "Origin" },
+      { ROW_SEQ: 0, COLUMN_SEQ: 3, COLUMN_NM: "Destination" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 1, COLUMN_NM: "" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 2, COLUMN_NM: "06:00" },
+      { ROW_SEQ: 1, COLUMN_SEQ: 3, COLUMN_NM: "06:20" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 1, COLUMN_NM: "211" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 2, COLUMN_NM: "07:00" },
+      { ROW_SEQ: 2, COLUMN_SEQ: 3, COLUMN_NM: "07:20" },
+    ]);
+
+    expect(parsed.hasVariantColumn).toBe(true);
+    expect(parsed.concreteVariantRowCount).toBe(1);
+    expect(parsed.inheritedVariantRowCount).toBe(0);
+    expect(parsed.unresolvedVariantRowCount).toBe(1);
+    expect(parsed.variants.map((variant) => variant.variantKey)).toEqual(["default", "211"]);
   });
 
   it("falls back to a default variant when there is no route label column", () => {
@@ -140,6 +195,9 @@ describe("bus jeju parser", () => {
         ],
       },
     ]);
+    expect(parsed.hasVariantColumn).toBe(false);
+    expect(parsed.inheritedVariantRowCount).toBe(0);
+    expect(parsed.unresolvedVariantRowCount).toBe(0);
   });
 
   it("ignores blank separator columns that happen to contain times", () => {

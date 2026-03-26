@@ -26,4 +26,41 @@ describe("stop matching helpers", () => {
     expect(parsed.stopNames).toEqual(["Terminal", "Airport"]);
     expect(parsed.variants[0]?.trips[0]?.times).toEqual(["06:00", "06:20"]);
   });
+
+  it("matches shorthand and terminal aliases seen in recent near misses", () => {
+    expect(
+      scoreStopNameMatch("\uC81C\uC8FC\uB300", "\uC81C\uC8FC\uB300\uD559\uAD50"),
+    ).toBe(100);
+    expect(
+      scoreStopNameMatch("\uD55C\uB77C\uB300", "\uC81C\uC8FC\uD55C\uB77C\uB300\uD559\uAD50"),
+    ).toBe(100);
+    expect(
+      scoreStopNameMatch(
+        "\uC81C\uC8FC\uB3C4\uCCAD(\uC2E0\uC81C\uC8FC\uB85C\uD0C0\uB9AC)",
+        "\uC81C\uC8FC\uB3C4\uCCAD(\uC2E0\uC81C\uC8FC\uB85C\uD130\uB9AC)",
+      ),
+    ).toBe(100);
+    expect(
+      scoreStopNameMatch(
+        "\uC11C\uADC0\uD3EC \uBC84\uC2A4\uD130\uBBF8\uB110",
+        "\uC11C\uADC0\uD3EC\uBC84\uC2A4\uD130\uBBF8\uB110",
+      ),
+    ).toBe(100);
+    expect(
+      scoreStopNameMatch(
+        "\uC11C\uADC0\uD3EC\uC911\uC559 \uB85C\uD130\uB9AC(\uC11C)",
+        "\uC11C\uADC0\uD3EC\uC911\uC559\uB85C\uD130\uB9AC",
+      ),
+    ).toBe(100);
+    expect(
+      scoreStopNameMatch("\uC6A9\uB2F4 \uC0AC\uAC70\uB9AC", "\uC6A9\uB2F4\uC0AC\uAC70\uB9AC"),
+    ).toBe(100);
+  });
+
+  it("keeps partial substring scoring for non-exact stop labels", () => {
+    const score = scoreStopNameMatch("Terminal", "Main Terminal Gate");
+
+    expect(score).toBeGreaterThan(0);
+    expect(score).toBeLessThan(100);
+  });
 });

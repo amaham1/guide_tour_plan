@@ -54,6 +54,7 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [loadingResults, setLoadingResults] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [includeGeneratedTimes, setIncludeGeneratedTimes] = useState(false);
   const [startAt, setStartAt] = useState(() => {
     const initial = new Date();
     initial.setMinutes(Math.ceil(initial.getMinutes() / 10) * 10, 0, 0);
@@ -176,6 +177,7 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
             body: JSON.stringify({
               language: "ko",
               startAt: new Date(startAt).toISOString(),
+              includeGeneratedTimes,
               places: selectedPlaces.map(buildPlanPlaceInput),
             }),
           });
@@ -232,6 +234,21 @@ export function PlannerForm({ catalogReady, setupMessage }: PlannerFormProps) {
             onChange={(event) => setStartAt(event.target.value)}
             className="mt-2 w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-lagoon/40"
           />
+        </label>
+
+        <label className="mt-5 flex items-start gap-3 rounded-2xl border border-ink/10 bg-white/70 px-4 py-3 text-sm text-ink/80">
+          <input
+            type="checkbox"
+            checked={includeGeneratedTimes}
+            onChange={(event) => setIncludeGeneratedTimes(event.target.checked)}
+            className="mt-0.5 size-4 rounded border-ink/20 text-lagoon focus:ring-lagoon/30"
+          />
+          <span>
+            <span className="block font-medium text-ink">생성 시각 포함</span>
+            <span className="mt-1 block text-ink/60">
+              공식 시간표가 비어 있는 중간 정류장은 서비스가 생성한 시각을 함께 사용합니다.
+            </span>
+          </span>
         </label>
 
         <div className="mt-5">

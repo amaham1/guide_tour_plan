@@ -77,6 +77,7 @@ type TripStopContext = {
 
 type TripContext = {
   id: string;
+  routingKey?: string;
   routePatternId: string;
   routeShortName: string;
   routeDisplayName: string;
@@ -261,7 +262,7 @@ function buildWarnings(metrics: CandidateMetrics): CandidateWarning[] {
   if (metrics.usesEstimatedStopTimes) {
     warnings.push({
       code: "ESTIMATED_STOP_TIMES",
-      message: "일부 정류장 시각은 보간값입니다. 여유 시간을 두고 이동해 주세요.",
+      message: "일부 정류장 시각은 공식 시간표가 없어 서비스가 생성한 시각입니다. 여유 시간을 두고 이동해 주세요.",
     });
   }
 
@@ -667,9 +668,10 @@ function buildRouteIndex(context: PlannerGraphContext): RoutingIndex {
   const groupedTrips = new Map<string, TripContext[]>();
 
   for (const trip of context.trips) {
-    const next = groupedTrips.get(trip.routePatternId) ?? [];
+    const routeKey = trip.routingKey ?? trip.routePatternId;
+    const next = groupedTrips.get(routeKey) ?? [];
     next.push(trip);
-    groupedTrips.set(trip.routePatternId, next);
+    groupedTrips.set(routeKey, next);
   }
 
   const routesById = new Map<string, RouteContext>();
@@ -959,9 +961,7 @@ function scanRoute(
         (round === 1 ? FIRST_BOARD_BUFFER : TRANSFER_BUFFER) +
         (estimated ? ESTIMATED_BUFFER : 0),
       usesEstimatedStopTimes: activeBoard.previousLabel.usesEstimatedStopTimes || estimated,
-      realtimeEligible:
-        activeBoard.previousLabel.realtimeEligible ||
-        context.realtimePatternIds.has(activeBoard.trip.routePatternId),
+      realtimeEligible: true,
       signature: `${activeBoard.previousLabel.signature}|ride:${activeBoard.trip.id}:${activeBoard.boardStopTime.stopId}:${alightStopTime.stopId}`,
       legs: nextLegs,
     };
@@ -1067,7 +1067,7 @@ function findSegmentOptions(
       walkMinutes: access.durationMinutes,
       safetyBufferCost: 0,
       usesEstimatedStopTimes: false,
-      realtimeEligible: false,
+      realtimeEligible: true,
       signature: `access:${currentPlaceId}:${access.toStopId}`,
       legs: [
         createAccessWalkLeg(
@@ -1141,7 +1141,7 @@ function buildItineraries(input: PlannerEngineInput, context: PlannerGraphContex
         transfers: 0,
         usesEstimatedStopTimes: false,
         safetyBufferCost: 0,
-        realtimeEligible: false,
+        realtimeEligible: true,
       },
       legs: [],
     },

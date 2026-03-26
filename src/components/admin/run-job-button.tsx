@@ -26,7 +26,7 @@ export function RunJobButton({ jobKey }: { jobKey: string }) {
       }}
       className="rounded-xl border border-ink/10 bg-white px-3 py-2 text-sm font-medium text-ink transition hover:border-lagoon/35 hover:text-lagoon disabled:cursor-wait disabled:opacity-60"
     >
-      {pending ? "실행 중..." : "지금 실행"}
+      {pending ? "Running..." : "Run now"}
     </button>
   );
 }

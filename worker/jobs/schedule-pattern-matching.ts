@@ -1,4 +1,4 @@
-import { scoreStopNameMatch } from "@/worker/jobs/helpers";
+import { buildStopNameKeys, scoreStopNameMatch } from "@/worker/jobs/helpers";
 import { extractRouteShortNameTokens } from "@/worker/jobs/route-labels";
 
 export type MatchablePatternStop = {
@@ -38,6 +38,8 @@ export type PatternMatchInput = {
     destination: string | null;
   };
   viaStops?: string[];
+  minimumCoverage?: number;
+  minimumStopScore?: number;
 };
 
 function getStopScore(stopName: string, stop: MatchablePatternStop) {
@@ -130,6 +132,7 @@ function resolveMinimumCoverage(
 export function matchStopNamesToPattern(
   stopNames: string[],
   pattern: MatchableRoutePattern,
+  minimumStopScore = 70,
 ): PatternMatchResult {
   const matchedStops: PatternStopMatch[] = [];
   const unmatchedStopNames: string[] = [];
@@ -155,7 +158,7 @@ export function matchStopNamesToPattern(
       }
     }
 
-    if (!bestStop || bestScore < 70 || bestIndex < cursor) {
+    if (!bestStop || bestScore < minimumStopScore || bestIndex < cursor) {
       unmatchedStopNames.push(stopName);
       continue;
     }
@@ -181,34 +184,54 @@ export function matchStopNamesToPattern(
 export function chooseBestPatternMatch(input: PatternMatchInput, patterns: MatchableRoutePattern[]) {
   const ranked = patterns
     .map((pattern) => {
-      const result = matchStopNamesToPattern(input.stopNames, pattern);
+      const result = matchStopNamesToPattern(
+        input.stopNames,
+        pattern,
+        input.minimumStopScore ?? 70,
+      );
       const variantExact = Boolean(
         input.variantKey && extractRouteShortNameTokens(pattern.shortName).includes(input.variantKey),
       );
       const terminalExactCount = getTerminalExactCount(input.stopNames, pattern);
       const viaMatchedCount = getViaMatchedCount(input.viaStops ?? [], pattern);
       const waypointTerminalMatches = getWaypointTerminalMatches(input.terminalHint, pattern);
-      const minimumCoverage = resolveMinimumCoverage(
-        input,
-        variantExact,
-        terminalExactCount,
-        waypointTerminalMatches,
-        viaMatchedCount,
-      );
+      const minimumCoverage =
+        input.minimumCoverage ??
+        resolveMinimumCoverage(
+          input,
+          variantExact,
+          terminalExactCount,
+          waypointTerminalMatches,
+          viaMatchedCount,
+        );
 
       return {
         ...result,
+        patternId: pattern.id,
+        shortName: pattern.shortName,
         variantExact,
         terminalExactCount,
         viaMatchedCount,
         waypointTerminalMatches,
         minimumCoverage,
+        displayName: pattern.displayName ?? null,
+        directionLabel: pattern.directionLabel ?? null,
         terminalSignature: [
           pattern.stops[0]?.displayName ?? "",
           pattern.stops[pattern.stops.length - 1]?.displayName ?? "",
         ].join("|"),
         matchedStopSignature: result.matchedStops
           .map((stop) => `${stop.stopId}:${stop.sequence}`)
+          .join("|"),
+        matchedNameSignature: result.matchedStops
+          .map((stop) => {
+            const matchedPatternStop = pattern.stops.find(
+              (candidateStop) =>
+                candidateStop.stopId === stop.stopId && candidateStop.sequence === stop.sequence,
+            );
+            const [primaryKey] = buildStopNameKeys(matchedPatternStop?.displayName ?? "");
+            return primaryKey ?? `${stop.sequence}`;
+          })
           .join("|"),
       };
     })
@@ -238,7 +261,11 @@ export function chooseBestPatternMatch(input: PatternMatchInput, patterns: Match
         return right.viaMatchedCount - left.viaMatchedCount;
       }
 
-      return right.waypointTerminalMatches - left.waypointTerminalMatches;
+      if (left.waypointTerminalMatches !== right.waypointTerminalMatches) {
+        return right.waypointTerminalMatches - left.waypointTerminalMatches;
+      }
+
+      return left.patternId.localeCompare(right.patternId);
     });
 
   const best = ranked[0];
@@ -261,7 +288,15 @@ export function chooseBestPatternMatch(input: PatternMatchInput, patterns: Match
     tiedResults.length > 1 &&
     !tiedResults.every((candidate) => candidate.matchedStopSignature === best.matchedStopSignature)
   ) {
-    return null;
+    const equivalentDuplicates = tiedResults.every(
+      (candidate) =>
+        candidate.matchedNameSignature === best.matchedNameSignature &&
+        candidate.shortName === best.shortName,
+    );
+
+    if (!equivalentDuplicates) {
+      return null;
+    }
   }
 
   return {

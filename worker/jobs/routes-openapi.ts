@@ -1,4 +1,5 @@
 import { fetchPlainText } from "@/worker/core/fetch";
+import { isExcludedTransitRoute } from "@/lib/transit-route-policy";
 import type { WorkerRuntime } from "@/worker/core/runtime";
 import { parseRouteDetailHtml, parseRouteSearchHtml } from "@/worker/jobs/bus-jeju-parser";
 import type { JobOutcome } from "@/worker/jobs/types";
@@ -52,7 +53,14 @@ export async function runRoutesOpenApiJob(runtime: WorkerRuntime): Promise<JobOu
     const detailHtml = await fetchRouteDetail(runtime, item.scheduleId);
     const detail = parseRouteDetailHtml(detailHtml, item.scheduleId);
     const routeId = `route-${detail.shortName}`;
-    activeRouteIds.add(routeId);
+    const isActiveRoute = !isExcludedTransitRoute([
+      item.shortName,
+      detail.shortName,
+      detail.displayName,
+    ]);
+    if (isActiveRoute) {
+      activeRouteIds.add(routeId);
+    }
 
     await runtime.prisma.route.upsert({
       where: {
@@ -61,13 +69,13 @@ export async function runRoutesOpenApiJob(runtime: WorkerRuntime): Promise<JobOu
       update: {
         shortName: detail.shortName,
         displayName: detail.displayName,
-        isActive: true,
+        isActive: isActiveRoute,
       },
       create: {
         id: routeId,
         shortName: detail.shortName,
         displayName: detail.displayName,
-        isActive: true,
+        isActive: isActiveRoute,
       },
     });
   }
