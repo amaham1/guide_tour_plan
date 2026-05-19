@@ -596,4 +596,40 @@ describe("schedule pattern matching", () => {
 
     expect(match).toBeNull();
   });
+
+  it("keeps repeated loop stops in order when the timetable header revisits a terminal", () => {
+    const match = chooseBestPatternMatch(
+      {
+        variantKey: "910",
+        stopNames: ["Terminal", "Transfer", "Terminal", "Museum"],
+        minimumCoverage: 1,
+        minimumStopScore: 70,
+      },
+      [
+        {
+          id: "pattern-loop",
+          shortName: "910",
+          stops: [
+            { stopId: "a", sequence: 1, displayName: "Terminal", translations: [] },
+            { stopId: "b", sequence: 2, displayName: "Transfer", translations: [] },
+            { stopId: "c", sequence: 3, displayName: "Terminal", translations: [] },
+            { stopId: "d", sequence: 4, displayName: "Museum", translations: [] },
+          ],
+        },
+        {
+          id: "pattern-short",
+          shortName: "910",
+          stops: [
+            { stopId: "a", sequence: 1, displayName: "Terminal", translations: [] },
+            { stopId: "b", sequence: 2, displayName: "Transfer", translations: [] },
+            { stopId: "d", sequence: 3, displayName: "Museum", translations: [] },
+          ],
+        },
+      ],
+    );
+
+    expect(match?.patternId).toBe("pattern-loop");
+    expect(match?.coverageRatio).toBe(1);
+    expect(match?.matchedStops.map((stop) => stop.sequence)).toEqual([1, 2, 3, 4]);
+  });
 });

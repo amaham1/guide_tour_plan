@@ -42,6 +42,10 @@ export type PatternMatchInput = {
   minimumStopScore?: number;
 };
 
+type RankedPatternMatch = PatternMatchResult & {
+  matchedPatternIndexes: number[];
+};
+
 function getStopScore(stopName: string, stop: MatchablePatternStop) {
   return Math.max(
     scoreStopNameMatch(stopName, stop.displayName),
@@ -134,50 +138,112 @@ export function matchStopNamesToPattern(
   pattern: MatchableRoutePattern,
   minimumStopScore = 70,
 ): PatternMatchResult {
-  const matchedStops: PatternStopMatch[] = [];
-  const unmatchedStopNames: string[] = [];
-  let score = 0;
-  let cursor = 0;
+  const scoreMatrix = stopNames.map((stopName) =>
+    pattern.stops.map((stop) => getStopScore(stopName, stop)),
+  );
+  const memo = new Map<string, RankedPatternMatch>();
 
-  for (const stopName of stopNames) {
-    let bestIndex = -1;
-    let bestScore = 0;
-    let bestStop: MatchablePatternStop | null = null;
+  function compareRankedMatches(left: RankedPatternMatch, right: RankedPatternMatch) {
+    if (left.matchedStops.length !== right.matchedStops.length) {
+      return right.matchedStops.length - left.matchedStops.length;
+    }
 
-    for (let index = cursor; index < pattern.stops.length; index += 1) {
-      const candidate = pattern.stops[index];
-      const candidateScore = getStopScore(stopName, candidate);
-      if (candidateScore > bestScore) {
-        bestIndex = index;
-        bestScore = candidateScore;
-        bestStop = candidate;
-      }
+    if (left.score !== right.score) {
+      return right.score - left.score;
+    }
 
-      if (candidateScore === 100) {
-        break;
+    if (left.unmatchedStopNames.length !== right.unmatchedStopNames.length) {
+      return left.unmatchedStopNames.length - right.unmatchedStopNames.length;
+    }
+
+    for (
+      let index = 0;
+      index < Math.min(left.matchedPatternIndexes.length, right.matchedPatternIndexes.length);
+      index += 1
+    ) {
+      if (left.matchedPatternIndexes[index] !== right.matchedPatternIndexes[index]) {
+        return left.matchedPatternIndexes[index] - right.matchedPatternIndexes[index];
       }
     }
 
-    if (!bestStop || bestScore < minimumStopScore || bestIndex < cursor) {
-      unmatchedStopNames.push(stopName);
-      continue;
-    }
-
-    matchedStops.push({
-      stopId: bestStop.stopId,
-      sequence: bestStop.sequence,
-      score: bestScore,
-    });
-    score += bestScore;
-    cursor = bestIndex + 1;
+    return 0;
   }
 
+  function search(stopNameIndex: number, cursor: number): RankedPatternMatch {
+    const key = `${stopNameIndex}:${cursor}`;
+    const cached = memo.get(key);
+    if (cached) {
+      return cached;
+    }
+
+    if (stopNameIndex >= stopNames.length) {
+      const empty = {
+        patternId: pattern.id,
+        matchedStops: [],
+        unmatchedStopNames: [],
+        score: 0,
+        coverageRatio: 0,
+        matchedPatternIndexes: [],
+      } satisfies RankedPatternMatch;
+      memo.set(key, empty);
+      return empty;
+    }
+
+    const skipResult = search(stopNameIndex + 1, cursor);
+    let best = {
+      patternId: pattern.id,
+      matchedStops: skipResult.matchedStops,
+      unmatchedStopNames: [stopNames[stopNameIndex], ...skipResult.unmatchedStopNames],
+      score: skipResult.score,
+      coverageRatio: 0,
+      matchedPatternIndexes: skipResult.matchedPatternIndexes,
+    } satisfies RankedPatternMatch;
+
+    for (let patternIndex = cursor; patternIndex < pattern.stops.length; patternIndex += 1) {
+      const candidateScore = scoreMatrix[stopNameIndex]?.[patternIndex] ?? 0;
+      if (candidateScore < minimumStopScore) {
+        continue;
+      }
+
+      const next = search(stopNameIndex + 1, patternIndex + 1);
+      const candidate = {
+        patternId: pattern.id,
+        matchedStops: [
+          {
+            stopId: pattern.stops[patternIndex].stopId,
+            sequence: pattern.stops[patternIndex].sequence,
+            score: candidateScore,
+          },
+          ...next.matchedStops,
+        ],
+        unmatchedStopNames: next.unmatchedStopNames,
+        score: candidateScore + next.score,
+        coverageRatio: 0,
+        matchedPatternIndexes: [patternIndex, ...next.matchedPatternIndexes],
+      } satisfies RankedPatternMatch;
+
+      if (compareRankedMatches(candidate, best) < 0) {
+        best = candidate;
+      }
+    }
+
+    best = {
+      ...best,
+      coverageRatio:
+        stopNames.length === 0 ? 0 : best.matchedStops.length / stopNames.length,
+    };
+    memo.set(key, best);
+    return best;
+  }
+
+  const best = search(0, 0);
+
   return {
-    patternId: pattern.id,
-    matchedStops,
-    unmatchedStopNames,
-    score,
-    coverageRatio: stopNames.length === 0 ? 0 : matchedStops.length / stopNames.length,
+    patternId: best.patternId,
+    matchedStops: best.matchedStops,
+    unmatchedStopNames: best.unmatchedStopNames,
+    score: best.score,
+    coverageRatio: best.coverageRatio,
   };
 }
 

@@ -155,12 +155,13 @@ export default async function AdminPage() {
               </div>
             </div>
 
-            <div className="mt-5 grid gap-4 md:grid-cols-4">
+            <div className="mt-5 grid gap-4 md:grid-cols-5">
               {[
                 ["Active Source", dashboard.scheduleMatchingStats.activeScheduleSourceCount],
                 ["Matched Variant", dashboard.scheduleMatchingStats.matchedVariantCount],
                 ["Unmatched Variant", dashboard.scheduleMatchingStats.unmatchedVariantCount],
                 ["Skipped Variant", dashboard.scheduleMatchingStats.skippedVariantCount],
+                ["Retryable Failure", dashboard.scheduleMatchingStats.retryableFailureCount],
               ].map(([label, value]) => (
                 <div key={label} className="rounded-2xl border border-ink/8 bg-white p-4">
                   <p className="text-sm text-ink/55">{label}</p>
@@ -257,7 +258,7 @@ export default async function AdminPage() {
               </div>
             </div>
 
-            <div className="mt-5 grid gap-4 xl:grid-cols-2">
+            <div className="mt-5 grid gap-4 xl:grid-cols-3">
               <div className="rounded-2xl border border-ink/8 bg-white p-4">
                 <h3 className="text-lg font-semibold text-ink">Mixed Variant Diagnostics</h3>
                 <p className="mt-2 text-sm text-ink/55">
@@ -312,6 +313,32 @@ export default async function AdminPage() {
                           </p>
                           <span className="text-sm text-ink/55">{item.count}</span>
                         </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-ink/8 bg-white p-4">
+                <h3 className="text-lg font-semibold text-ink">Retryable Failures</h3>
+                <div className="mt-4 space-y-3">
+                  {dashboard.scheduleMatchingStats.retryableFailures.length === 0 ? (
+                    <p className="text-sm text-ink/55">No retryable failures recorded.</p>
+                  ) : (
+                    dashboard.scheduleMatchingStats.retryableFailures.map((item) => (
+                      <div
+                        key={`${item.scheduleId}-${item.variantKey}`}
+                        className="rounded-xl border border-ink/8 px-3 py-3"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-medium text-ink">
+                            {item.shortName} [{item.variantKey}]
+                          </p>
+                          <span className="text-sm text-ink/55">{item.reasonSubtype}</span>
+                        </div>
+                        <p className="mt-1 text-sm text-ink/55">
+                          schedule {item.scheduleId} | reason {item.reason}
+                        </p>
                       </div>
                     ))
                   )}
@@ -397,6 +424,33 @@ export default async function AdminPage() {
                   ? ` | stale by ${dashboard.timetableSyncStats.lagMinutes} min`
                   : ""}
               </p>
+              <p className="mt-1 text-sm text-ink/55">
+                strict derived {dashboard.timetableSyncStats.strictDerivedStopTimes} | rough derived{" "}
+                {dashboard.timetableSyncStats.roughDerivedStopTimes} | eligible but unfilled{" "}
+                {dashboard.timetableSyncStats.eligibleButUnfilledTrips}
+              </p>
+            </div>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-3">
+              <div className="rounded-2xl border border-ink/8 bg-white p-4">
+                <p className="text-sm text-ink/55">Active patterns without trips</p>
+                <p className="mt-1 text-2xl font-semibold text-ink">
+                  {dashboard.timetableSyncStats.activePatternWithoutTripCount}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-ink/8 bg-white p-4">
+                <p className="text-sm text-ink/55">Active stops with any time</p>
+                <p className="mt-1 text-2xl font-semibold text-ink">
+                  {dashboard.timetableSyncStats.activeStopCount -
+                    dashboard.timetableSyncStats.activeStopWithoutAnyTimeCount}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-ink/8 bg-white p-4">
+                <p className="text-sm text-ink/55">Active stops without time</p>
+                <p className="mt-1 text-2xl font-semibold text-ink">
+                  {dashboard.timetableSyncStats.activeStopWithoutAnyTimeCount}
+                </p>
+              </div>
             </div>
 
             <div className="mt-4 rounded-2xl border border-ink/8 bg-white p-4">
@@ -407,6 +461,23 @@ export default async function AdminPage() {
               <p className="mt-1 text-sm text-ink/55">
                 {dashboard.vehicleMapStats.mappedPatterns} / {dashboard.vehicleMapStats.totalPatterns}
               </p>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-ink/8 bg-white p-4 text-sm text-ink/55">
+              observation rows {dashboard.observationStats.gnssObservationCount} | stop passages{" "}
+              {dashboard.observationStats.observedStopPassageCount}
+              <br />
+              latest GNSS {formatUnknownDate(dashboard.observationStats.latestGnssObservationAt)} |
+              latest passage {formatUnknownDate(dashboard.observationStats.latestObservedStopPassageAt)}
+              <br />
+              segment profiles {dashboard.observationStats.segmentTravelProfileCount} | observed
+              derived {dashboard.observationStats.segmentProfileDerivedStopTimeCount}
+              <br />
+              jobs: gnss-history {formatUnknownDate(dashboard.observationStats.latestGnssHistoryAt)}
+              {" | "}segment-profiles{" "}
+              {formatUnknownDate(dashboard.observationStats.latestSegmentProfilesAt)}
+              {" | "}observed-timetables{" "}
+              {formatUnknownDate(dashboard.observationStats.latestObservedTimetablesAt)}
             </div>
 
             <div className="mt-4 rounded-2xl border border-ink/8 bg-white p-4 text-sm text-ink/55">
@@ -445,6 +516,27 @@ export default async function AdminPage() {
                     : "none"}
                 </>
               ) : null}
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-ink/8 bg-white p-4">
+              <h3 className="text-lg font-semibold text-ink">Derived Skip Reasons</h3>
+              <div className="mt-4 space-y-3">
+                {dashboard.timetableSyncStats.skipReasonBreakdown.length === 0 ? (
+                  <p className="text-sm text-ink/55">No skip reasons recorded.</p>
+                ) : (
+                  dashboard.timetableSyncStats.skipReasonBreakdown.map((item) => (
+                    <div
+                      key={`${item.reason}-${item.count}`}
+                      className="rounded-xl border border-ink/8 px-3 py-3"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="font-medium text-ink">{item.reason}</p>
+                        <span className="text-sm text-ink/55">{item.count}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
 
             {dashboard.timetableSyncStats.zeroTripScheduleSources.length > 0 ? (

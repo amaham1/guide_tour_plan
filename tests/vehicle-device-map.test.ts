@@ -35,6 +35,22 @@ describe("vehicle-device-map job", () => {
 
     const upsert = vi.fn();
     const deleteMany = vi.fn();
+    const routePatternFindMany = vi.fn().mockResolvedValue([
+      {
+        id: "pattern-202",
+        externalRouteId: "405320214",
+        route: {
+          shortName: "202",
+        },
+      },
+      {
+        id: "pattern-111",
+        externalRouteId: "405411101",
+        route: {
+          shortName: "111",
+        },
+      },
+    ]);
     const runtime = {
       env: {
         busJejuBaseUrl: "https://bus.jeju.go.kr",
@@ -42,22 +58,7 @@ describe("vehicle-device-map job", () => {
       },
       prisma: {
         routePattern: {
-          findMany: vi.fn().mockResolvedValue([
-            {
-              id: "pattern-202",
-              externalRouteId: "405320214",
-              route: {
-                shortName: "202",
-              },
-            },
-            {
-              id: "pattern-111",
-              externalRouteId: "405411101",
-              route: {
-                shortName: "111",
-              },
-            },
-          ]),
+          findMany: routePatternFindMany,
         },
         vehicleDeviceMap: {
           upsert,
@@ -68,6 +69,17 @@ describe("vehicle-device-map job", () => {
 
     const outcome = await runVehicleDeviceMapJob(runtime);
 
+    expect(routePatternFindMany).toHaveBeenCalledWith({
+      where: {
+        isActive: true,
+        route: {
+          isActive: true,
+        },
+      },
+      include: {
+        route: true,
+      },
+    });
     expect(fetchBusJejuRealtimePositionsMock).toHaveBeenCalledTimes(2);
     expect(outcome.successCount).toBe(2);
     expect(outcome.meta).toEqual(

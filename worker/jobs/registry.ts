@@ -1,4 +1,5 @@
 import { runGnssHistoryJob } from "@/worker/jobs/gnss-history";
+import { runObservedTimetablesJob } from "@/worker/jobs/observed-timetables";
 import { runOsrmBusCustomizeJob } from "@/worker/jobs/osrm-bus-customize";
 import { runRouteGeometriesJob } from "@/worker/jobs/route-geometries";
 import { runRoutePatternsOpenApiJob } from "@/worker/jobs/route-patterns-openapi";
@@ -26,6 +27,7 @@ export const jobRegistry: Record<string, JobHandler> = {
   "vehicle-device-map": runVehicleDeviceMapJob,
   "gnss-history": runGnssHistoryJob,
   "segment-profiles": runSegmentProfilesJob,
+  "observed-timetables": runObservedTimetablesJob,
   "osrm-bus-customize": runOsrmBusCustomizeJob,
   "transit-audit": runTransitAuditJob,
   "visit-jeju-places": runVisitJejuPlacesJob,

@@ -19,6 +19,15 @@ export async function getAdminDashboard() {
     latestTimetablesXlsxRun,
     zeroTripScheduleSourceCount,
     zeroTripScheduleSources,
+    activePatternWithoutTripCount,
+    activeStopCount,
+    activeStopWithoutAnyTimeCount,
+    gnssObservationCount,
+    latestGnssObservation,
+    observedStopPassageCount,
+    latestObservedStopPassage,
+    segmentTravelProfileCount,
+    segmentProfileDerivedStopTimeCount,
   ] = await Promise.all([
     getPlannerCatalogStatus(db),
     db.dataSource.findMany({
@@ -226,6 +235,114 @@ export async function getAdminDashboard() {
       orderBy: [{ scheduleId: "asc" }, { variantKey: "asc" }],
       take: 8,
     }),
+    db.routePattern.count({
+      where: {
+        isActive: true,
+        route: {
+          isActive: true,
+        },
+        scheduleSources: {
+          some: {
+            isActive: true,
+          },
+        },
+        trips: {
+          none: {
+            scheduleSource: {
+              is: {
+                isActive: true,
+              },
+            },
+          },
+        },
+      },
+    }),
+    db.stop.count({
+      where: {
+        routePatternStops: {
+          some: {
+            routePattern: {
+              isActive: true,
+              route: {
+                isActive: true,
+              },
+            },
+          },
+        },
+      },
+    }),
+    db.stop.count({
+      where: {
+        routePatternStops: {
+          some: {
+            routePattern: {
+              isActive: true,
+              route: {
+                isActive: true,
+              },
+            },
+          },
+        },
+        stopTimes: {
+          none: {
+            trip: {
+              routePattern: {
+                isActive: true,
+                route: {
+                  isActive: true,
+                },
+              },
+              scheduleSource: {
+                is: {
+                  isActive: true,
+                },
+              },
+            },
+          },
+        },
+        derivedStopTimes: {
+          none: {
+            trip: {
+              routePattern: {
+                isActive: true,
+                route: {
+                  isActive: true,
+                },
+              },
+              scheduleSource: {
+                is: {
+                  isActive: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    db.gnssObservation.count(),
+    db.gnssObservation.findFirst({
+      orderBy: {
+        observedAt: "desc",
+      },
+      select: {
+        observedAt: true,
+      },
+    }),
+    db.observedStopPassage.count(),
+    db.observedStopPassage.findFirst({
+      orderBy: {
+        observedAt: "desc",
+      },
+      select: {
+        observedAt: true,
+      },
+    }),
+    db.segmentTravelProfile.count(),
+    db.derivedStopTime.count({
+      where: {
+        timeSource: "SEGMENT_PROFILE",
+      },
+    }),
   ]);
 
   const poiJoinExceptions = places
@@ -306,6 +423,9 @@ export async function getAdminDashboard() {
   });
 
   const latestVehicleMapRun = runs.find((run) => run.job.key === "vehicle-device-map");
+  const latestGnssHistoryRun = runs.find((run) => run.job.key === "gnss-history");
+  const latestSegmentProfilesRun = runs.find((run) => run.job.key === "segment-profiles");
+  const latestObservedTimetablesRun = runs.find((run) => run.job.key === "observed-timetables");
   const routeGeometryMeta =
     latestRouteGeometryRun?.meta && typeof latestRouteGeometryRun.meta === "object"
       ? (latestRouteGeometryRun.meta as Record<string, unknown>)
@@ -318,6 +438,10 @@ export async function getAdminDashboard() {
     latestRoutesHtmlRun?.endedAt ?? latestRoutesHtmlRun?.startedAt ?? null;
   const latestTimetablesXlsxAt =
     latestTimetablesXlsxRun?.endedAt ?? latestTimetablesXlsxRun?.startedAt ?? null;
+  const timetablesXlsxMeta =
+    latestTimetablesXlsxRun?.meta && typeof latestTimetablesXlsxRun.meta === "object"
+      ? (latestTimetablesXlsxRun.meta as Record<string, unknown>)
+      : null;
   const timetableSyncStatus = !latestRoutesHtmlAt
     ? "idle"
     : latestTimetablesXlsxRun?.status === "RUNNING" &&
@@ -371,6 +495,47 @@ export async function getAdminDashboard() {
     typeof routesHtmlMeta?.unresolvedVariantRowCount === "number"
       ? routesHtmlMeta.unresolvedVariantRowCount
       : 0;
+  const retryableFailures = unmatchedVariants.filter(
+    (
+      item,
+    ): item is {
+      scheduleId: string;
+      variantKey: string;
+      shortName: string;
+      reason: string;
+      reasonSubtype: string;
+      retryable: true;
+    } =>
+      Boolean(item) &&
+      typeof item === "object" &&
+      typeof item.scheduleId === "string" &&
+      typeof item.variantKey === "string" &&
+      typeof item.shortName === "string" &&
+      typeof item.reason === "string" &&
+      typeof item.reasonSubtype === "string" &&
+      item.retryable === true,
+  );
+  const strictDerivedStopTimes =
+    typeof timetablesXlsxMeta?.strictDerivedStopTimes === "number"
+      ? timetablesXlsxMeta.strictDerivedStopTimes
+      : 0;
+  const roughDerivedStopTimes =
+    typeof timetablesXlsxMeta?.roughDerivedStopTimes === "number"
+      ? timetablesXlsxMeta.roughDerivedStopTimes
+      : 0;
+  const eligibleButUnfilledTrips =
+    typeof timetablesXlsxMeta?.eligibleButUnfilledTrips === "number"
+      ? timetablesXlsxMeta.eligibleButUnfilledTrips
+      : 0;
+  const skipReasonBreakdown = Array.isArray(timetablesXlsxMeta?.skipReasonBreakdown)
+    ? timetablesXlsxMeta.skipReasonBreakdown.filter(
+        (item): item is { reason: string; count: number } =>
+          Boolean(item) &&
+          typeof item === "object" &&
+          typeof item.reason === "string" &&
+          typeof item.count === "number",
+      )
+    : [];
 
   return {
     catalogStatus,
@@ -387,16 +552,29 @@ export async function getAdminDashboard() {
         patterns.length === 0 ? 0 : Math.round((mappedPatternCount / patterns.length) * 100),
       latestRunAt: latestVehicleMapRun?.endedAt ?? null,
     },
+    observationStats: {
+      gnssObservationCount,
+      latestGnssObservationAt: latestGnssObservation?.observedAt ?? null,
+      observedStopPassageCount,
+      latestObservedStopPassageAt: latestObservedStopPassage?.observedAt ?? null,
+      segmentTravelProfileCount,
+      segmentProfileDerivedStopTimeCount,
+      latestGnssHistoryAt: latestGnssHistoryRun?.endedAt ?? null,
+      latestSegmentProfilesAt: latestSegmentProfilesRun?.endedAt ?? null,
+      latestObservedTimetablesAt: latestObservedTimetablesRun?.endedAt ?? null,
+    },
     scheduleMatchingStats: {
       activeScheduleSourceCount,
       latestRoutesHtmlAt,
       matchedVariantCount: matchedVariants.length,
       unmatchedVariantCount: unmatchedVariants.length,
       skippedVariantCount: skippedSpecialSchedules.length,
+      retryableFailureCount: retryableFailures.length,
       matchedRouteLabels: matchedRouteLabels.slice(0, 12),
       unmatchedRouteLabels: unmatchedRouteLabels.slice(0, 12),
       rejectionBreakdown: rejectionBreakdown.slice(0, 8),
       nearMisses: nearMisses.slice(0, 8),
+      retryableFailures: retryableFailures.slice(0, 8),
       resolvedMixedVariantSchedules: resolvedMixedVariantSchedules.slice(0, 8),
       unresolvedMixedVariantSchedules: unresolvedMixedVariantSchedules.slice(0, 8),
       inheritedVariantRowCount,
@@ -411,6 +589,13 @@ export async function getAdminDashboard() {
         timetableSyncStatus === "stale" && timetableSyncLagMinutes !== null
           ? timetableSyncLagMinutes
           : null,
+      strictDerivedStopTimes,
+      roughDerivedStopTimes,
+      eligibleButUnfilledTrips,
+      skipReasonBreakdown: skipReasonBreakdown.slice(0, 8),
+      activePatternWithoutTripCount,
+      activeStopCount,
+      activeStopWithoutAnyTimeCount,
       zeroTripScheduleSourceCount,
       zeroTripScheduleSources,
     },

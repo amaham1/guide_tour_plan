@@ -103,6 +103,11 @@ type DerivedPatternResult = {
   anchorPairCount: number;
 };
 
+type DerivationDiagnostics = {
+  eligibleAnchorPairs: number;
+  skipReasonCounts: Map<string, number>;
+};
+
 type PatternProjectionPoint = {
   patternIndex: number;
   stopId: string;
@@ -124,6 +129,30 @@ type TripStopProfile = {
   columnIndexes: number[];
   stopNames: string[];
 };
+
+function createDerivationDiagnostics(): DerivationDiagnostics {
+  return {
+    eligibleAnchorPairs: 0,
+    skipReasonCounts: new Map(),
+  };
+}
+
+function recordDerivationSkipReason(
+  diagnostics: DerivationDiagnostics | undefined,
+  reason: string,
+) {
+  if (!diagnostics) {
+    return;
+  }
+
+  diagnostics.skipReasonCounts.set(reason, (diagnostics.skipReasonCounts.get(reason) ?? 0) + 1);
+}
+
+function mergeReasonBreakdown(target: Map<string, number>, source: Map<string, number>) {
+  for (const [reason, count] of source.entries()) {
+    target.set(reason, (target.get(reason) ?? 0) + count);
+  }
+}
 
 function buildMatchablePattern(source: ScheduleSourceContext): MatchableRoutePattern {
   return {
@@ -372,14 +401,16 @@ export function fillPatternTimes(
   } satisfies OfficialPatternResult;
 }
 
-export function derivePatternTimes(
+function derivePatternTimesInternal(
   source: ScheduleSourceContext,
   matchedStops: PatternStopMatch[],
   row: ParsedScheduleTrip,
   columnIndexes?: number[],
+  diagnostics?: DerivationDiagnostics,
 ) {
   const officialAnchors = extractOfficialAnchors(source, matchedStops, row, columnIndexes);
   if (!officialAnchors) {
+    recordDerivationSkipReason(diagnostics, "strict_insufficient_official_anchors");
     return null;
   }
 
@@ -394,9 +425,16 @@ export function derivePatternTimes(
     const rightAnchor = officialAnchors[anchorIndex + 1];
     const interiorStopCount = rightAnchor.patternIndex - leftAnchor.patternIndex - 1;
 
-    if (interiorStopCount <= 0 || interiorStopCount > MAX_DERIVED_ANCHOR_STOP_GAP) {
+    if (interiorStopCount <= 0) {
       continue;
     }
+
+    if (interiorStopCount > MAX_DERIVED_ANCHOR_STOP_GAP) {
+      recordDerivationSkipReason(diagnostics, "strict_anchor_stop_gap_exceeded");
+      continue;
+    }
+
+    diagnostics && (diagnostics.eligibleAnchorPairs += 1);
 
     const segmentProjections = projections.slice(
       leftAnchor.patternIndex,
@@ -404,6 +442,7 @@ export function derivePatternTimes(
     );
 
     if (segmentProjections.some((projection) => !isUsableProjection(projection))) {
+      recordDerivationSkipReason(diagnostics, "strict_unusable_projection");
       continue;
     }
 
@@ -419,6 +458,7 @@ export function derivePatternTimes(
       spanMinutes <= 0 ||
       spanMinutes > MAX_DERIVED_ANCHOR_MINUTES
     ) {
+      recordDerivationSkipReason(diagnostics, "strict_anchor_span_out_of_range");
       continue;
     }
 
@@ -461,6 +501,9 @@ export function derivePatternTimes(
   }
 
   if (derivedStopCount === 0) {
+    if ((diagnostics?.eligibleAnchorPairs ?? 0) > 0) {
+      recordDerivationSkipReason(diagnostics, "strict_no_rows_materialized");
+    }
     return null;
   }
 
@@ -471,14 +514,25 @@ export function derivePatternTimes(
   } satisfies DerivedPatternResult;
 }
 
-export function deriveRoughPatternTimes(
+export function derivePatternTimes(
   source: ScheduleSourceContext,
   matchedStops: PatternStopMatch[],
   row: ParsedScheduleTrip,
   columnIndexes?: number[],
 ) {
+  return derivePatternTimesInternal(source, matchedStops, row, columnIndexes);
+}
+
+function deriveRoughPatternTimesInternal(
+  source: ScheduleSourceContext,
+  matchedStops: PatternStopMatch[],
+  row: ParsedScheduleTrip,
+  columnIndexes?: number[],
+  diagnostics?: DerivationDiagnostics,
+) {
   const officialAnchors = extractOfficialAnchors(source, matchedStops, row, columnIndexes);
   if (!officialAnchors) {
+    recordDerivationSkipReason(diagnostics, "rough_insufficient_official_anchors");
     return null;
   }
 
@@ -492,9 +546,16 @@ export function deriveRoughPatternTimes(
     const rightAnchor = officialAnchors[anchorIndex + 1];
     const interiorStopCount = rightAnchor.patternIndex - leftAnchor.patternIndex - 1;
 
-    if (interiorStopCount <= 0 || interiorStopCount > MAX_ROUGH_ANCHOR_STOP_GAP) {
+    if (interiorStopCount <= 0) {
       continue;
     }
+
+    if (interiorStopCount > MAX_ROUGH_ANCHOR_STOP_GAP) {
+      recordDerivationSkipReason(diagnostics, "rough_anchor_stop_gap_exceeded");
+      continue;
+    }
+
+    diagnostics && (diagnostics.eligibleAnchorPairs += 1);
 
     const distanceProgress = buildDistanceProgressPoints(source, leftAnchor, rightAnchor);
     const projectionProgress =
@@ -504,6 +565,7 @@ export function deriveRoughPatternTimes(
     const progressPoints = distanceProgress ?? projectionProgress;
 
     if (!progressPoints) {
+      recordDerivationSkipReason(diagnostics, "rough_progress_unavailable");
       continue;
     }
 
@@ -518,6 +580,7 @@ export function deriveRoughPatternTimes(
       spanMinutes <= 0 ||
       spanMinutes > MAX_ROUGH_ANCHOR_MINUTES
     ) {
+      recordDerivationSkipReason(diagnostics, "rough_anchor_span_out_of_range");
       continue;
     }
 
@@ -566,6 +629,9 @@ export function deriveRoughPatternTimes(
   }
 
   if (derivedStopCount === 0) {
+    if ((diagnostics?.eligibleAnchorPairs ?? 0) > 0) {
+      recordDerivationSkipReason(diagnostics, "rough_no_rows_materialized");
+    }
     return null;
   }
 
@@ -574,6 +640,15 @@ export function deriveRoughPatternTimes(
     derivedStopCount,
     anchorPairCount,
   } satisfies DerivedPatternResult;
+}
+
+export function deriveRoughPatternTimes(
+  source: ScheduleSourceContext,
+  matchedStops: PatternStopMatch[],
+  row: ParsedScheduleTrip,
+  columnIndexes?: number[],
+) {
+  return deriveRoughPatternTimesInternal(source, matchedStops, row, columnIndexes);
 }
 
 function isAcceptedPatternMatch(
@@ -637,7 +712,11 @@ export async function runTimetablesXlsxJob(runtime: WorkerRuntime): Promise<JobO
 
   let officialTripCount = 0;
   let derivedStopTimeCount = 0;
+  let strictDerivedStopTimeCount = 0;
+  let roughDerivedStopTimeCount = 0;
+  let eligibleButUnfilledTripCount = 0;
   let failureCount = 0;
+  const skipReasonBreakdown = new Map<string, number>();
   const unmatchedSources: Array<{
     scheduleId: string;
     variantKey: string;
@@ -649,6 +728,15 @@ export async function runTimetablesXlsxJob(runtime: WorkerRuntime): Promise<JobO
     try {
       const { rows } = await fetchScheduleTable(runtime, source.scheduleId);
       const table = parseScheduleTableRows(rows);
+
+      // Clear the previous materialization for this source before deciding whether
+      // the latest table still exposes a usable variant.
+      await runtime.prisma.trip.deleteMany({
+        where: {
+          scheduleSourceId: source.id,
+        },
+      });
+
       const variant =
         table.variants.find((item) => item.variantKey === source.variantKey) ??
         (source.variantKey === "default" && table.variants.length === 1 ? table.variants[0] : null);
@@ -663,12 +751,6 @@ export async function runTimetablesXlsxJob(runtime: WorkerRuntime): Promise<JobO
         });
         continue;
       }
-
-      await runtime.prisma.trip.deleteMany({
-        where: {
-          scheduleSourceId: source.id,
-        },
-      });
 
       let sourceTripCount = 0;
 
@@ -734,25 +816,45 @@ export async function runTimetablesXlsxJob(runtime: WorkerRuntime): Promise<JobO
         });
         officialTripCount += 1;
 
-        const derived = derivePatternTimes(
+        const strictDiagnostics = createDerivationDiagnostics();
+        const roughDiagnostics = createDerivationDiagnostics();
+        const strictResult = derivePatternTimesInternal(
           source,
           match.matchedStops,
           row,
           tripStopProfile.columnIndexes,
+          strictDiagnostics,
         );
-        const roughDerived = deriveRoughPatternTimes(
+        const roughDerived = deriveRoughPatternTimesInternal(
           source,
           match.matchedStops,
           row,
           tripStopProfile.columnIndexes,
+          roughDiagnostics,
         );
-        const strictSequences = new Set(derived?.times.map((timePoint) => timePoint.sequence) ?? []);
+        mergeReasonBreakdown(skipReasonBreakdown, strictDiagnostics.skipReasonCounts);
+        mergeReasonBreakdown(skipReasonBreakdown, roughDiagnostics.skipReasonCounts);
+
+        strictDerivedStopTimeCount += strictResult?.derivedStopCount ?? 0;
+
+        const strictSequences = new Set(
+          strictResult?.times.map((timePoint) => timePoint.sequence) ?? [],
+        );
+        const persistedRoughTimes =
+          roughDerived?.times.filter((timePoint) => !strictSequences.has(timePoint.sequence)) ?? [];
+        roughDerivedStopTimeCount += persistedRoughTimes.length;
         const combinedDerivedTimes = [
-          ...(derived?.times ?? []),
-          ...(roughDerived?.times.filter((timePoint) => !strictSequences.has(timePoint.sequence)) ?? []),
+          ...(strictResult?.times ?? []),
+          ...persistedRoughTimes,
         ];
 
         if (combinedDerivedTimes.length === 0) {
+          if (
+            strictDiagnostics.eligibleAnchorPairs > 0 ||
+            roughDiagnostics.eligibleAnchorPairs > 0
+          ) {
+            eligibleButUnfilledTripCount += 1;
+          }
           continue;
         }
 
@@ -805,6 +907,12 @@ export async function runTimetablesXlsxJob(runtime: WorkerRuntime): Promise<JobO
       scheduleSources: scheduleSources.length,
       trips: officialTripCount,
       derivedStopTimes: derivedStopTimeCount,
+      strictDerivedStopTimes: strictDerivedStopTimeCount,
+      roughDerivedStopTimes: roughDerivedStopTimeCount,
+      eligibleButUnfilledTrips: eligibleButUnfilledTripCount,
+      skipReasonBreakdown: [...skipReasonBreakdown.entries()]
+        .map(([reason, count]) => ({ reason, count }))
+        .sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason)),
       unmatchedSources,
     },
   };

@@ -46,6 +46,21 @@ function getUpcomingLegIndex(legs: CandidateLeg[], now: Date) {
   return legs.findIndex((leg) => new Date(leg.startAt).getTime() > nowMs);
 }
 
+function getTrackedRideLeg(
+  currentLeg: CandidateLeg | null,
+  nextLeg: CandidateLeg | null,
+) {
+  if (currentLeg?.kind === "ride") {
+    return currentLeg;
+  }
+
+  if (nextLeg?.kind === "ride") {
+    return nextLeg;
+  }
+
+  return null;
+}
+
 export function buildExecutionStatus(
   sessionId: string,
   snapshot: Snapshot,
@@ -103,14 +118,23 @@ export function buildExecutionStatus(
 
   const currentLegIndex =
     activeLegIndex >= 0 ? activeLegIndex : Math.max(nextLegIndex, 0);
+  const trackedRideLeg = getTrackedRideLeg(currentLeg, nextLeg);
 
-  if (currentLeg && currentLeg.kind === "ride" && options.realtime?.applied) {
+  if (trackedRideLeg && options.realtime?.applied) {
+    const nextActionAt =
+      trackedRideLeg.kind === "ride"
+        ? addMinutes(
+            trackedRideLeg === currentLeg ? trackedRideLeg.endAt : trackedRideLeg.startAt,
+            options.realtime.delayMinutes,
+          )
+        : null;
+
     return {
       sessionId,
       status: "ACTIVE",
       realtimeApplied: true,
       delayMinutes: options.realtime.delayMinutes,
-      nextActionAt: addMinutes(currentLeg.endAt, options.realtime.delayMinutes),
+      nextActionAt,
       replacementSuggested: options.realtime.replacementSuggested,
       notice: options.realtime.notice,
       realtimeReason: options.realtime.reason ?? null,

@@ -24,6 +24,9 @@
 - `DerivedStopTime`에 `windowStartMinutes` / `windowEndMinutes`가 추가되었습니다.
 - 결과 화면, 실행 세션 화면, 관리자 화면이 새 신뢰도 모델을 반영합니다.
 - 관리자 지표에서 기존 `generated` 집계를 `estimated`와 `rough`로 분리했습니다.
+- 관리자 화면의 시간표 품질 요약은 최신 `routes-html` / `timetables-xlsx` ingest meta를 기준으로
+  `strict derived`, `rough derived`, `eligible but unfilled trips`, `retryable failure`,
+  `active patterns without trip`, `active stops without any time`를 함께 보여줍니다.
 - 레거시 호환을 위해 `includeGeneratedTimes`는 계속 받지만 다음처럼 매핑됩니다.
   - `false -> OFFICIAL_ONLY`
   - `true -> INCLUDE_ESTIMATED`

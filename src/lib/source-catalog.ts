@@ -11,10 +11,7 @@ export type SourceCatalogSeed = {
   isActive?: boolean;
 };
 
-export const GNSS_DERIVED_DISABLED_JOB_KEYS = [
-  "segment-profiles",
-  "osrm-bus-customize",
-] as const;
+export const GNSS_DERIVED_DISABLED_JOB_KEYS = ["osrm-bus-customize"] as const;
 
 export const sourceCatalog: SourceCatalogSeed[] = [
   {
@@ -102,7 +99,7 @@ export const sourceCatalog: SourceCatalogSeed[] = [
   {
     key: "gnss-history",
     name: "GNSS raw history",
-    description: "Captures raw GNSS snapshots for future analysis and validation.",
+    description: "Captures route-contextual GNSS snapshots for observation-based timetable recovery.",
     sourceKind: "OPEN_API",
     officialUrl: "https://www.data.go.kr",
     guideUrl: "https://www.data.go.kr",
@@ -115,8 +112,16 @@ export const sourceCatalog: SourceCatalogSeed[] = [
     sourceKind: "INTERNAL_JOB",
     officialUrl: "https://project-osrm.org",
     guideUrl: "https://project-osrm.org/docs",
-    scheduleLabel: "Disabled",
-    isActive: false,
+    scheduleLabel: "Hourly",
+  },
+  {
+    key: "observed-timetables",
+    name: "Observed timetable expansion",
+    description: "Fills missing sparse timetable stops from stable GNSS-derived segment profiles.",
+    sourceKind: "INTERNAL_JOB",
+    officialUrl: "https://bus.jeju.go.kr",
+    guideUrl: "https://bus.jeju.go.kr/publicTrafficInformation/generalBusSchedule?viewtype=3",
+    scheduleLabel: "Hourly",
   },
   {
     key: "osrm-bus-customize",

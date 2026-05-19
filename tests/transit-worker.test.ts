@@ -1145,6 +1145,51 @@ describe("transit worker jobs", () => {
     });
   });
 
+  it("marks fetch and timeout style routes-html failures as retryable", async () => {
+    fetchPlainTextMock.mockImplementation(async (url: string) => {
+      if (url.includes("detailSchedule?scheduleId=2601")) {
+        throw new Error("fetch failed: socket hang up");
+      }
+
+      return `<a href="/mobile/schedule/detailSchedule?scheduleId=2601">131번</a>`;
+    });
+
+    const upsert = vi.fn();
+    const runtime = {
+      env: {
+        busJejuBaseUrl: "https://bus.jeju.go.kr",
+        routeSearchTerms: [],
+      },
+      prisma: {
+        routePattern: {
+          findMany: vi.fn().mockResolvedValue([]),
+          update: vi.fn(),
+        },
+        routePatternScheduleSource: {
+          updateMany: vi.fn(),
+          upsert,
+        },
+        trip: {
+          deleteMany: vi.fn(),
+        },
+      },
+    } as never;
+
+    const outcome = await runRoutesHtmlJob(runtime);
+
+    expect(outcome.successCount).toBe(0);
+    expect(upsert).not.toHaveBeenCalled();
+    expect(outcome.meta).toMatchObject({
+      unmatchedVariants: [
+        expect.objectContaining({
+          scheduleId: "2601",
+          reasonSubtype: "processing_error(fetch failed)",
+          retryable: true,
+        }),
+      ],
+    });
+  });
+
   it("deactivates stale schedule sources when a schedule is skipped as special", async () => {
     fetchPlainTextMock.mockImplementation(async (url: string) => {
       if (url.includes("detailSchedule?scheduleId=2402")) {
@@ -1441,6 +1486,103 @@ describe("transit worker jobs", () => {
     });
   });
 
+  it("clears stale trips when the latest timetable no longer exposes the expected variant", async () => {
+    fetchScheduleTableMock.mockResolvedValue({
+      rows: [
+        { ROW_SEQ: 0, COLUMN_SEQ: 1, COLUMN_NM: "노선번호" },
+        { ROW_SEQ: 0, COLUMN_SEQ: 2, COLUMN_NM: "Origin" },
+        { ROW_SEQ: 0, COLUMN_SEQ: 3, COLUMN_NM: "Destination" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 1, COLUMN_NM: "355번" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 2, COLUMN_NM: "06:00" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 3, COLUMN_NM: "06:20" },
+      ],
+    });
+
+    const tripDeleteMany = vi.fn();
+    const tripCreate = vi.fn();
+    const runtime = {
+      prisma: {
+        serviceCalendar: {
+          upsert: vi.fn(),
+        },
+        routePatternScheduleSource: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: "schedule-source-missing-variant",
+              scheduleId: "2999",
+              variantKey: "356",
+              routePatternId: "pattern-356",
+              isActive: true,
+              routePattern: {
+                id: "pattern-356",
+                directionLabel: "Origin -> Destination",
+                displayName: "356 Origin Destination",
+                waypointText: "Origin -> Destination",
+                viaText: null,
+                route: {
+                  id: "route-356",
+                  shortName: "356",
+                  displayName: "356",
+                  isActive: true,
+                  createdAt: new Date(),
+                },
+                stopProjections: [],
+                stops: [
+                  {
+                    sequence: 1,
+                    stop: {
+                      id: "stop-a",
+                      displayName: "Origin",
+                      translations: [],
+                    },
+                  },
+                  {
+                    sequence: 2,
+                    stop: {
+                      id: "stop-b",
+                      displayName: "Destination",
+                      translations: [],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        },
+        trip: {
+          deleteMany: tripDeleteMany,
+          create: tripCreate,
+        },
+        stopTime: {
+          createMany: vi.fn(),
+        },
+        derivedStopTime: {
+          createMany: vi.fn(),
+        },
+      },
+      env: {},
+    } as never;
+
+    const outcome = await runTimetablesXlsxJob(runtime);
+
+    expect(outcome.successCount).toBe(0);
+    expect(tripDeleteMany).toHaveBeenCalledWith({
+      where: {
+        scheduleSourceId: "schedule-source-missing-variant",
+      },
+    });
+    expect(tripCreate).not.toHaveBeenCalled();
+    expect(outcome.meta).toMatchObject({
+      unmatchedSources: [
+        expect.objectContaining({
+          scheduleId: "2999",
+          variantKey: "356",
+          reason: "MISSING_VARIANT_ROWS",
+        }),
+      ],
+    });
+  });
+
   it("stores anchor-bounded derived stop times when the official table skips intermediate stops", async () => {
     fetchScheduleTableMock.mockResolvedValue({
       rows: [
@@ -1588,6 +1730,9 @@ describe("transit worker jobs", () => {
     expect(outcome.meta).toMatchObject({
       trips: 1,
       derivedStopTimes: 1,
+      strictDerivedStopTimes: 1,
+      roughDerivedStopTimes: 0,
+      eligibleButUnfilledTrips: 0,
     });
   });
 
@@ -1731,6 +1876,113 @@ describe("transit worker jobs", () => {
     expect(outcome.meta).toMatchObject({
       trips: 1,
       derivedStopTimes: 2,
+      strictDerivedStopTimes: 0,
+      roughDerivedStopTimes: 2,
+      eligibleButUnfilledTrips: 0,
+    });
+  });
+
+  it("records eligible but unfilled derived trips when strict and rough derivation both fail after anchor validation", async () => {
+    fetchScheduleTableMock.mockResolvedValue({
+      rows: [
+        { ROW_SEQ: 0, COLUMN_SEQ: 1, COLUMN_NM: "노선번호" },
+        { ROW_SEQ: 0, COLUMN_SEQ: 2, COLUMN_NM: "Origin" },
+        { ROW_SEQ: 0, COLUMN_SEQ: 3, COLUMN_NM: "Destination" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 1, COLUMN_NM: "212번" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 2, COLUMN_NM: "06:30" },
+        { ROW_SEQ: 1, COLUMN_SEQ: 3, COLUMN_NM: "06:55" },
+      ],
+    });
+
+    const derivedStopTimeCreateMany = vi.fn();
+    const runtime = {
+      prisma: {
+        serviceCalendar: {
+          upsert: vi.fn(),
+        },
+        routePatternScheduleSource: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: "schedule-source-unfilled",
+              scheduleId: "2399",
+              variantKey: "default",
+              routePatternId: "pattern-unfilled",
+              isActive: true,
+              routePattern: {
+                id: "pattern-unfilled",
+                directionLabel: "Origin -> Destination",
+                displayName: "212 Origin Destination",
+                waypointText: "Origin -> Destination",
+                viaText: "Origin-Midpoint-Destination",
+                route: {
+                  id: "route-unfilled",
+                  shortName: "212",
+                  displayName: "212",
+                  isActive: true,
+                  createdAt: new Date(),
+                },
+                stopProjections: [],
+                stops: [
+                  {
+                    sequence: 1,
+                    distanceFromStart: Number.NaN,
+                    stop: {
+                      id: "stop-a",
+                      displayName: "Origin",
+                      translations: [],
+                    },
+                  },
+                  {
+                    sequence: 2,
+                    distanceFromStart: Number.NaN,
+                    stop: {
+                      id: "stop-b",
+                      displayName: "Midpoint",
+                      translations: [],
+                    },
+                  },
+                  {
+                    sequence: 3,
+                    distanceFromStart: Number.NaN,
+                    stop: {
+                      id: "stop-c",
+                      displayName: "Destination",
+                      translations: [],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        },
+        trip: {
+          deleteMany: vi.fn(),
+          create: vi.fn().mockImplementation(async ({ data }) => ({ id: data.id })),
+        },
+        stopTime: {
+          createMany: vi.fn(),
+        },
+        derivedStopTime: {
+          createMany: derivedStopTimeCreateMany,
+        },
+      },
+      env: {},
+    } as never;
+
+    const outcome = await runTimetablesXlsxJob(runtime);
+
+    expect(outcome.successCount).toBe(1);
+    expect(derivedStopTimeCreateMany).not.toHaveBeenCalled();
+    expect(outcome.meta).toMatchObject({
+      trips: 1,
+      derivedStopTimes: 0,
+      strictDerivedStopTimes: 0,
+      roughDerivedStopTimes: 0,
+      eligibleButUnfilledTrips: 1,
+      skipReasonBreakdown: expect.arrayContaining([
+        expect.objectContaining({ reason: "strict_unusable_projection", count: 1 }),
+        expect.objectContaining({ reason: "rough_progress_unavailable", count: 1 }),
+      ]),
     });
   });
 

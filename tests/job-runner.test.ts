@@ -7,6 +7,7 @@ const {
   routesHtmlHandlerMock,
   routeGeometriesHandlerMock,
   timetablesXlsxHandlerMock,
+  observedTimetablesHandlerMock,
 } = vi.hoisted(() => ({
   syncSourceCatalogMock: vi.fn(),
   createWorkerRuntimeMock: vi.fn(),
@@ -14,6 +15,7 @@ const {
   routesHtmlHandlerMock: vi.fn(),
   routeGeometriesHandlerMock: vi.fn(),
   timetablesXlsxHandlerMock: vi.fn(),
+  observedTimetablesHandlerMock: vi.fn(),
 }));
 
 vi.mock("@/lib/source-catalog", () => ({
@@ -30,6 +32,7 @@ vi.mock("@/worker/jobs/registry", () => ({
     "routes-html": routesHtmlHandlerMock,
     "route-geometries": routeGeometriesHandlerMock,
     "timetables-xlsx": timetablesXlsxHandlerMock,
+    "observed-timetables": observedTimetablesHandlerMock,
   },
 }));
 
@@ -61,6 +64,7 @@ describe("job runner follow-ups", () => {
     routesHtmlHandlerMock.mockReset();
     routeGeometriesHandlerMock.mockReset();
     timetablesXlsxHandlerMock.mockReset();
+    observedTimetablesHandlerMock.mockReset();
   });
 
   afterEach(() => {
@@ -79,6 +83,11 @@ describe("job runner follow-ups", () => {
       successCount: 12,
       failureCount: 0,
     };
+    const observedTimetablesOutcome = {
+      processedCount: 12,
+      successCount: 4,
+      failureCount: 0,
+    };
 
     createWorkerRuntimeMock.mockImplementation((options?: { prisma?: unknown; triggeredBy?: string }) => ({
       prisma: options?.prisma ?? prisma,
@@ -87,6 +96,7 @@ describe("job runner follow-ups", () => {
     }));
     routesHtmlHandlerMock.mockResolvedValue(routesHtmlOutcome);
     timetablesXlsxHandlerMock.mockResolvedValue(timetablesOutcome);
+    observedTimetablesHandlerMock.mockResolvedValue(observedTimetablesOutcome);
 
     const { runJobByKey } = await import("@/worker/core/job-runner");
     const results = await runJobByKey("routes-html", {
@@ -97,11 +107,16 @@ describe("job runner follow-ups", () => {
     expect(results).toEqual({
       "routes-html": routesHtmlOutcome,
       "timetables-xlsx": timetablesOutcome,
+      "observed-timetables": observedTimetablesOutcome,
     });
     expect(routesHtmlHandlerMock).toHaveBeenCalledTimes(1);
     expect(timetablesXlsxHandlerMock).toHaveBeenCalledTimes(1);
+    expect(observedTimetablesHandlerMock).toHaveBeenCalledTimes(1);
     expect(routesHtmlHandlerMock.mock.invocationCallOrder[0]).toBeLessThan(
       timetablesXlsxHandlerMock.mock.invocationCallOrder[0],
+    );
+    expect(timetablesXlsxHandlerMock.mock.invocationCallOrder[0]).toBeLessThan(
+      observedTimetablesHandlerMock.mock.invocationCallOrder[0],
     );
     expect(createWorkerRuntimeMock).toHaveBeenNthCalledWith(1, {
       prisma,
@@ -111,7 +126,11 @@ describe("job runner follow-ups", () => {
       prisma,
       triggeredBy: "admin:follow-up:routes-html",
     });
-    expect(syncSourceCatalogMock).toHaveBeenCalledTimes(2);
+    expect(createWorkerRuntimeMock).toHaveBeenNthCalledWith(3, {
+      prisma,
+      triggeredBy: "admin:follow-up:routes-html:follow-up:timetables-xlsx",
+    });
+    expect(syncSourceCatalogMock).toHaveBeenCalledTimes(3);
   });
 
   it("keeps run-all explicit and does not double-run follow-up jobs", async () => {
@@ -142,6 +161,11 @@ describe("job runner follow-ups", () => {
       successCount: 4,
       failureCount: 0,
     });
+    observedTimetablesHandlerMock.mockResolvedValue({
+      processedCount: 5,
+      successCount: 5,
+      failureCount: 0,
+    });
 
     const { runAllJobs } = await import("@/worker/core/job-runner");
     const results = await runAllJobs({
@@ -154,9 +178,12 @@ describe("job runner follow-ups", () => {
       "routes-html",
       "route-geometries",
       "timetables-xlsx",
+      "observed-timetables",
     ]);
     expect(timetablesXlsxHandlerMock).toHaveBeenCalledTimes(1);
+    expect(observedTimetablesHandlerMock).toHaveBeenCalledTimes(1);
     expect(createWorkerRuntimeMock.mock.calls.map(([options]) => options.triggeredBy)).toEqual([
+      "cli",
       "cli",
       "cli",
       "cli",

@@ -37,6 +37,17 @@ function timeReliabilityLabel(reliability: string) {
   }
 }
 
+function timeReliabilityNote(reliability: string) {
+  switch (reliability) {
+    case "ESTIMATED":
+      return "Interpolated between official anchor stops.";
+    case "ROUGH":
+      return "Range only. Realtime adjustment is not applied.";
+    default:
+      return null;
+  }
+}
+
 function formatTimeRange(startAt: string | null | undefined, endAt: string | null | undefined) {
   if (!startAt || !endAt) {
     return null;
@@ -130,6 +141,11 @@ export default async function PlannerResultsPage({
                   </p>
 
                   <div className="mt-4 flex flex-wrap gap-2">
+                    {candidate.summary.worstTimeReliability === "ESTIMATED" ? (
+                      <span className="rounded-full border border-lagoon/25 bg-lagoon/10 px-3 py-1 text-xs font-semibold text-lagoon">
+                        estimated timetable
+                      </span>
+                    ) : null}
                     {candidate.summary.worstTimeReliability === "ROUGH" ? (
                       <span className="rounded-full border border-coral/25 bg-coral/10 px-3 py-1 text-xs font-semibold text-coral">
                         대략 fallback
@@ -222,6 +238,11 @@ export default async function PlannerResultsPage({
                             <p className="mt-1 text-xs font-medium text-ink/45">
                               {timeReliabilityLabel(leg.timeReliability)}
                             </p>
+                            {timeReliabilityNote(leg.timeReliability) ? (
+                              <p className="mt-1 text-xs text-ink/50">
+                                {timeReliabilityNote(leg.timeReliability)}
+                              </p>
+                            ) : null}
                             {leg.subtitle ? (
                               <p className="mt-1 text-sm text-ink/60">{leg.subtitle}</p>
                             ) : null}

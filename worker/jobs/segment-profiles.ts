@@ -9,7 +9,9 @@ const TRACE_GAP_MS = 90_000;
 const MAX_OBSERVATION_SNAP_DISTANCE_METERS = 250;
 const MAX_SEGMENT_SPEED_KPH = 90;
 const SEGMENT_WINDOW_DAYS = 28;
+const STOP_PASSAGE_RETENTION_DAYS = 45;
 const MIN_MATCH_CONFIDENCE = 0.8;
+const MIN_SEGMENT_SAMPLE_COUNT = 5;
 const TURN_PENALTY_SHARE = 0.35;
 const MAX_TURN_PENALTY_SEC = 45;
 
@@ -176,6 +178,23 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
       penaltiesSec: number[];
     }
   >();
+  const observedStopPassages = new Map<
+    string,
+    {
+      routePatternId: string;
+      stopId: string;
+      sequence: number;
+      deviceId: string;
+      observedAt: Date;
+      serviceDayClass: ServiceDayClass;
+      bucketStartMinute: number;
+      source: string;
+      externalRouteId: string | null;
+      offsetMeters: number;
+      snapDistanceMeters: number;
+      confidence: number;
+    }
+  >();
   const routePatternIds = new Set<string>();
 
   for (const mapping of mappings) {
@@ -323,6 +342,34 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
         }
       }
 
+      for (const stopProjection of mapping.routePattern.stopProjections) {
+        const observedAt = stopPassTimes.get(stopProjection.sequence);
+        if (!observedAt) {
+          continue;
+        }
+
+        const key = [
+          mapping.routePatternId,
+          stopProjection.sequence,
+          mapping.deviceId,
+          observedAt.toISOString(),
+        ].join(":");
+        observedStopPassages.set(key, {
+          routePatternId: mapping.routePatternId,
+          stopId: stopProjection.stopId,
+          sequence: stopProjection.sequence,
+          deviceId: mapping.deviceId,
+          observedAt,
+          serviceDayClass: toServiceDayClass(observedAt),
+          bucketStartMinute: toBucketStartMinute(observedAt),
+          source: "GNSS_TRACE",
+          externalRouteId: mapping.externalRouteId,
+          offsetMeters: stopProjection.offsetMeters,
+          snapDistanceMeters: stopProjection.snapDistanceMeters,
+          confidence: stopProjection.confidence,
+        });
+      }
+
       for (let index = 1; index < mapping.routePattern.stopProjections.length; index += 1) {
         const from = mapping.routePattern.stopProjections[index - 1];
         const to = mapping.routePattern.stopProjections[index];
@@ -383,6 +430,10 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
         return null;
       }
 
+      if (aggregate.durationsSec.length < MIN_SEGMENT_SAMPLE_COUNT) {
+        return null;
+      }
+
       return {
         routePatternId: aggregate.routePatternId,
         fromSequence: aggregate.fromSequence,
@@ -423,6 +474,68 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
     });
   }
 
+  const stopPassageRetentionCutoff = new Date(
+    Date.now() - STOP_PASSAGE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  );
+  await runtime.prisma.observedStopPassage.deleteMany({
+    where: {
+      observedAt: {
+        lt: stopPassageRetentionCutoff,
+      },
+    },
+  });
+
+  let observedStopPassageInsertCount = 0;
+  const stopPassageRows = [...observedStopPassages.values()];
+  if (stopPassageRows.length > 0 && routePatternIds.size > 0) {
+    const earliestStopPassage = stopPassageRows.reduce(
+      (value, row) => (row.observedAt < value ? row.observedAt : value),
+      stopPassageRows[0].observedAt,
+    );
+    const latestStopPassage = stopPassageRows.reduce(
+      (value, row) => (row.observedAt > value ? row.observedAt : value),
+      stopPassageRows[0].observedAt,
+    );
+    const existingStopPassages = await runtime.prisma.observedStopPassage.findMany({
+      where: {
+        routePatternId: {
+          in: [...routePatternIds],
+        },
+        observedAt: {
+          gte: earliestStopPassage,
+          lte: latestStopPassage,
+        },
+      },
+      select: {
+        routePatternId: true,
+        sequence: true,
+        deviceId: true,
+        observedAt: true,
+      },
+    });
+    const existingStopPassageKeys = new Set(
+      existingStopPassages.map((row) =>
+        [row.routePatternId, row.sequence, row.deviceId, row.observedAt.toISOString()].join(":"),
+      ),
+    );
+    const insertStopPassages = stopPassageRows.filter((row) => {
+      const key = [
+        row.routePatternId,
+        row.sequence,
+        row.deviceId,
+        row.observedAt.toISOString(),
+      ].join(":");
+      return !existingStopPassageKeys.has(key);
+    });
+
+    if (insertStopPassages.length > 0) {
+      await runtime.prisma.observedStopPassage.createMany({
+        data: insertStopPassages,
+      });
+      observedStopPassageInsertCount = insertStopPassages.length;
+    }
+  }
+
   if (turnRows.length > 0) {
     await runtime.prisma.turnDelayProfile.createMany({
       data: turnRows,
@@ -438,6 +551,8 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
       routePatternCount: routePatternIds.size,
       segmentProfileCount: segmentRows.length,
       turnProfileCount: turnRows.length,
+      observedStopPassageCount: observedStopPassageInsertCount,
+      minSegmentSampleCount: MIN_SEGMENT_SAMPLE_COUNT,
     },
   };
 }

@@ -41,6 +41,43 @@ function formatLegStart(leg: ExecutionStatusDto["legs"][number]) {
   return formatClock(leg.startAt);
 }
 
+function legReliabilityNote(leg: ExecutionStatusDto["legs"][number]) {
+  if (leg.timeReliability === "ESTIMATED") {
+    return "공식 anchor 사이를 보간한 시각입니다.";
+  }
+
+  if (leg.timeReliability === "ROUGH") {
+    return "대략 범위만 제공하며 실시간 보정은 적용하지 않습니다.";
+  }
+
+  return null;
+}
+
+function realtimeReasonLabel(reason: string | null | undefined) {
+  switch (reason) {
+    case "GNSS":
+      return "GNSS realtime applied";
+    case "ROUGH_STOP_TIMES":
+      return "Rough time range excludes realtime";
+    case "VEHICLE_MAP_MISSING":
+      return "Vehicle map missing";
+    case "DATA_GO_KR_SERVICE_KEY_MISSING":
+      return "Realtime API key missing";
+    case "STOP_REFERENCE_MISSING":
+      return "Stop reference missing";
+    case "STOP_LOOKUP_FAILED":
+      return "Stop lookup failed";
+    case "GNSS_EMPTY":
+      return "GNSS feed returned no position";
+    case "GNSS_REQUEST_FAILED":
+      return "GNSS request failed";
+    case "NO_ACTIVE_RIDE":
+      return "No active ride leg";
+    default:
+      return reason ?? null;
+  }
+}
+
 function realtimeCopy(status: ExecutionStatusDto) {
   if (status.realtimeApplied) {
     return `${status.delayMinutes}분`;
@@ -116,8 +153,10 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
               {realtimeCopy(status)}
             </p>
             <p className="mt-2 text-sm text-ink/55">{status.notice}</p>
-            {status.realtimeReason ? (
-              <p className="mt-1 text-xs text-ink/45">{status.realtimeReason}</p>
+            {realtimeReasonLabel(status.realtimeReason) ? (
+              <p className="mt-1 text-xs text-ink/45">
+                {realtimeReasonLabel(status.realtimeReason)}
+              </p>
             ) : null}
           </div>
         </div>
@@ -141,6 +180,11 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
                   {formatLegTime(status.currentLeg)} ·{" "}
                   {formatDuration(status.currentLeg.durationMinutes)}
                 </p>
+                {legReliabilityNote(status.currentLeg) ? (
+                  <p className="mt-2 text-xs text-ink/45">
+                    {legReliabilityNote(status.currentLeg)}
+                  </p>
+                ) : null}
               </>
             ) : (
               <p className="mt-2 text-sm text-ink/55">
@@ -164,6 +208,11 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
                 <p className="mt-3 text-sm text-ink/55">
                   {formatLegStart(status.nextLeg)} 시작 예정
                 </p>
+                {legReliabilityNote(status.nextLeg) ? (
+                  <p className="mt-2 text-xs text-ink/45">
+                    {legReliabilityNote(status.nextLeg)}
+                  </p>
+                ) : null}
               </>
             ) : (
               <p className="mt-2 text-sm text-ink/55">다음 구간이 없습니다.</p>
@@ -225,6 +274,9 @@ export function ExecutePanel({ initialStatus }: ExecutePanelProps) {
                       </p>
                       <h4 className="mt-1 text-base font-semibold">{leg.title}</h4>
                       <p className="mt-1 text-xs text-white/45">{leg.timeReliability}</p>
+                      {legReliabilityNote(leg) ? (
+                        <p className="mt-1 text-xs text-white/50">{legReliabilityNote(leg)}</p>
+                      ) : null}
                       {leg.subtitle ? (
                         <p className="mt-1 text-sm text-white/60">{leg.subtitle}</p>
                       ) : null}

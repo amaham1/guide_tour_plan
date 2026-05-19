@@ -572,15 +572,58 @@ async function buildDynamicPlaceLinks(
   };
 }
 
-function getAllowedDerivedTimeSources(mode: TimeReliabilityMode) {
+export function getAllowedDerivedTimeSources(mode: TimeReliabilityMode) {
   switch (mode) {
     case "OFFICIAL_ONLY":
       return new Set<string>();
     case "INCLUDE_ESTIMATED":
-      return new Set(["OFFICIAL_ANCHOR_INTERPOLATED"]);
+      return new Set(["SEGMENT_PROFILE", "OFFICIAL_ANCHOR_INTERPOLATED"]);
     case "ALLOW_ROUGH":
-      return new Set(["OFFICIAL_ANCHOR_INTERPOLATED", "DISTANCE_INTERPOLATED"]);
+      return new Set([
+        "SEGMENT_PROFILE",
+        "OFFICIAL_ANCHOR_INTERPOLATED",
+        "DISTANCE_INTERPOLATED",
+      ]);
   }
+}
+
+function derivedStopTimeSourceRank(source: string) {
+  switch (source) {
+    case "SEGMENT_PROFILE":
+      return 3;
+    case "OFFICIAL_ANCHOR_INTERPOLATED":
+      return 2;
+    case "DISTANCE_INTERPOLATED":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+export function choosePreferredDerivedStopTimes<
+  T extends {
+    sequence: number;
+    timeSource: string;
+    confidence: number;
+  },
+>(stopTimes: T[]) {
+  const bySequence = new Map<number, T>();
+
+  for (const stopTime of stopTimes) {
+    const current = bySequence.get(stopTime.sequence);
+    if (
+      !current ||
+      derivedStopTimeSourceRank(stopTime.timeSource) >
+        derivedStopTimeSourceRank(current.timeSource) ||
+      (derivedStopTimeSourceRank(stopTime.timeSource) ===
+        derivedStopTimeSourceRank(current.timeSource) &&
+        stopTime.confidence > current.confidence)
+    ) {
+      bySequence.set(stopTime.sequence, stopTime);
+    }
+  }
+
+  return [...bySequence.values()].sort((left, right) => left.sequence - right.sequence);
 }
 
 async function loadPlannerGraph(
@@ -758,17 +801,17 @@ async function loadPlannerGraph(
         });
       }
 
-      if (
+      const allowedDerivedStopTimes = trip.derivedStopTimes.filter((stopTime) =>
+        allowedDerivedTimeSources.has(stopTime.timeSource),
+      );
+      const preferredDerivedStopTimes = choosePreferredDerivedStopTimes(allowedDerivedStopTimes);
+      const usableDerivedStopTimes =
         allowedDerivedTimeSources.size > 0 &&
-        trip.derivedStopTimes.length > 0 &&
-        isUsableGeneratedStopTimes(
-          pattern.stops,
-          trip.derivedStopTimes.filter((stopTime) =>
-            allowedDerivedTimeSources.has(stopTime.timeSource),
-          ),
-        )
-      ) {
-        for (const stopTime of trip.derivedStopTimes) {
+        preferredDerivedStopTimes.length > 0 &&
+        isUsableGeneratedStopTimes(pattern.stops, preferredDerivedStopTimes);
+
+      if (usableDerivedStopTimes) {
+        for (const stopTime of preferredDerivedStopTimes) {
           if (!allowedDerivedTimeSources.has(stopTime.timeSource)) {
             continue;
           }
@@ -789,6 +832,12 @@ async function loadPlannerGraph(
             windowEndMinutes: stopTime.windowEndMinutes,
           });
         }
+      } else if (allowedDerivedStopTimes.length > 0) {
+        console.warn("Skipped invalid derived stop times while loading planner graph", {
+          tripId: trip.id,
+          routePatternId: pattern.id,
+          derivedStopTimeCount: allowedDerivedStopTimes.length,
+        });
       }
 
       const normalizedStopTimes = [...mergedStopTimes.values()].sort(
@@ -1292,77 +1341,108 @@ async function resolveRealtimeSignal(
   prisma: PrismaClient,
   now = new Date(),
 ) {
-  const rideLeg =
-    provisional.currentLeg?.kind === "ride"
-      ? provisional.currentLeg
-      : provisional.nextLeg?.kind === "ride"
-        ? provisional.nextLeg
-        : null;
-
-  if (!rideLeg?.routePatternId) {
+  function buildRealtimeFallback(
+    reason: string,
+    notice = "현재는 시간표 기준 안내입니다.",
+  ) {
     return {
       applied: false,
       delayMinutes: 0,
       replacementSuggested: false,
-      notice: "현재는 시간표 기준 안내입니다.",
-      reason: "NO_ACTIVE_RIDE",
+      notice,
+      reason,
     };
   }
 
-  if (rideLeg.timeReliability === "ROUGH") {
-    return {
-      applied: false,
-      delayMinutes: 0,
-      replacementSuggested: false,
-      notice: "대략 시각 구간은 실시간 보정을 적용하지 않고 시간표 범위 기준으로 안내합니다.",
-      reason: "ROUGH_STOP_TIMES",
-    };
+  function findTrackedRideLeg(status: ExecutionStatusDto) {
+    const rideLeg =
+      status.currentLeg?.kind === "ride"
+        ? status.currentLeg
+        : status.nextLeg?.kind === "ride"
+          ? status.nextLeg
+          : null;
+
+    if (!rideLeg) {
+      return null;
+    }
+
+    const legIndex = status.legs.findIndex((leg) => leg.id === rideLeg.id);
+    return legIndex >= 0 ? { leg: rideLeg, legIndex } : null;
   }
 
-  const mapping = vehicleDeviceMap.get(rideLeg.routePatternId);
+  function shouldSuggestReplacement(
+    status: ExecutionStatusDto,
+    rideLegIndex: number,
+    delayMinutes: number,
+  ) {
+    if (delayMinutes <= 0) {
+      return false;
+    }
+
+    const rideLeg = status.legs[rideLegIndex];
+    if (!rideLeg || rideLeg.kind !== "ride") {
+      return false;
+    }
+
+    const nextRideLeg = status.legs.find(
+      (leg, index) => index > rideLegIndex && leg.kind === "ride",
+    );
+    if (!nextRideLeg) {
+      return false;
+    }
+
+    const scheduledSlackMinutes = Math.round(
+      (new Date(nextRideLeg.startAt).getTime() - new Date(rideLeg.endAt).getTime()) / 60_000,
+    );
+
+    return scheduledSlackMinutes < delayMinutes + 2;
+  }
+
+  const trackedRideLeg = findTrackedRideLeg(provisional);
+
+  if (!trackedRideLeg?.leg.routePatternId) {
+    return buildRealtimeFallback("NO_ACTIVE_RIDE");
+  }
+
+  if (trackedRideLeg.leg.timeReliability === "ROUGH") {
+    return buildRealtimeFallback(
+      "ROUGH_STOP_TIMES",
+      "대략 시각 구간은 실시간 보정을 적용하지 않고 시간표 범위 기준으로 안내합니다.",
+    );
+  }
+
+  const mapping = vehicleDeviceMap.get(trackedRideLeg.leg.routePatternId);
   if (!mapping) {
-    return {
-      applied: false,
-      delayMinutes: 0,
-      replacementSuggested: false,
-      notice: "현재는 시간표 기준 안내입니다.",
-      reason: "VEHICLE_MAP_MISSING",
-    };
+    return buildRealtimeFallback(
+      "VEHICLE_MAP_MISSING",
+      "차량 매핑이 없어 지금은 시간표 기준으로 안내합니다.",
+    );
   }
 
   if (!appEnv.dataGoKrServiceKey) {
-    return {
-      applied: false,
-      delayMinutes: 0,
-      replacementSuggested: false,
-      notice: "현재는 시간표 기준 안내입니다.",
-      reason: "DATA_GO_KR_SERVICE_KEY_MISSING",
-    };
+    return buildRealtimeFallback(
+      "DATA_GO_KR_SERVICE_KEY_MISSING",
+      "실시간 인증키가 없어 지금은 시간표 기준으로 안내합니다.",
+    );
   }
 
-  if (!rideLeg.fromStopId || !rideLeg.toStopId) {
-    return {
-      applied: false,
-      delayMinutes: 0,
-      replacementSuggested: false,
-      notice: "현재는 시간표 기준 안내입니다.",
-      reason: "STOP_REFERENCE_MISSING",
-    };
+  if (!trackedRideLeg.leg.fromStopId || !trackedRideLeg.leg.toStopId) {
+    return buildRealtimeFallback(
+      "STOP_REFERENCE_MISSING",
+      "정류장 기준점을 찾지 못해 지금은 시간표 기준으로 안내합니다.",
+    );
   }
 
   const [startStop, endStop] = await Promise.all([
-    prisma.stop.findUnique({ where: { id: rideLeg.fromStopId } }),
-    prisma.stop.findUnique({ where: { id: rideLeg.toStopId } }),
+    prisma.stop.findUnique({ where: { id: trackedRideLeg.leg.fromStopId } }),
+    prisma.stop.findUnique({ where: { id: trackedRideLeg.leg.toStopId } }),
   ]);
 
   if (!startStop || !endStop) {
-    return {
-      applied: false,
-      delayMinutes: 0,
-      replacementSuggested: false,
-      notice: "현재는 시간표 기준 안내입니다.",
-      reason: "STOP_LOOKUP_FAILED",
-    };
+    return buildRealtimeFallback(
+      "STOP_LOOKUP_FAILED",
+      "정류장 정보를 찾지 못해 지금은 시간표 기준으로 안내합니다.",
+    );
   }
 
   try {
@@ -1373,23 +1453,24 @@ async function resolveRealtimeSignal(
     );
 
     if (!position) {
-      return {
-        applied: false,
-        delayMinutes: 0,
-        replacementSuggested: false,
-        notice: "현재는 시간표 기준 안내입니다.",
-        reason: "GNSS_EMPTY",
-      };
+      return buildRealtimeFallback(
+        "GNSS_EMPTY",
+        "실시간 위치 수신이 없어 지금은 시간표 기준으로 안내합니다.",
+      );
     }
 
     const delayMinutes = estimateDelayMinutesFromGnss(
-      rideLeg,
+      trackedRideLeg.leg,
       startStop,
       endStop,
       position,
       now,
     );
-    const replacementSuggested = delayMinutes >= 3 && Boolean(provisional.nextLeg);
+    const replacementSuggested = shouldSuggestReplacement(
+      provisional,
+      trackedRideLeg.legIndex,
+      delayMinutes,
+    );
 
     return {
       applied: true,
@@ -1402,13 +1483,12 @@ async function resolveRealtimeSignal(
       reason: "GNSS",
     };
   } catch (error) {
-    return {
-      applied: false,
-      delayMinutes: 0,
-      replacementSuggested: false,
-      notice: "현재는 시간표 기준 안내입니다.",
-      reason: error instanceof Error ? error.message : "GNSS_REQUEST_FAILED",
-    };
+    return buildRealtimeFallback(
+      "GNSS_REQUEST_FAILED",
+      error instanceof Error && /timeout|timed out/i.test(error.message)
+        ? "실시간 위치 요청이 지연되어 지금은 시간표 기준으로 안내합니다."
+        : "실시간 위치 요청이 실패해 지금은 시간표 기준으로 안내합니다.",
+    );
   }
 }
 
@@ -1435,7 +1515,44 @@ export async function getExecutionSessionStatus(
   };
 
   const now = new Date();
-  const status = buildExecutionStatus(session.id, snapshot, {}, now);
+  const provisional = buildExecutionStatus(session.id, snapshot, {}, now);
+  const routePatternIds = [...new Set(
+    snapshot.legs
+      .filter((leg) => leg.kind === "ride" && leg.routePatternId)
+      .map((leg) => leg.routePatternId as string),
+  )];
+  const vehicleDeviceMappings =
+    routePatternIds.length === 0
+      ? []
+      : await db.vehicleDeviceMap.findMany({
+          where: {
+            routePatternId: {
+              in: routePatternIds,
+            },
+          },
+          orderBy: {
+            refreshedAt: "desc",
+          },
+        });
+  const vehicleDeviceMap = new Map<
+    string,
+    { deviceId: string; routePatternId: string; externalRouteId: string | null }
+  >();
+
+  for (const mapping of vehicleDeviceMappings) {
+    if (vehicleDeviceMap.has(mapping.routePatternId)) {
+      continue;
+    }
+
+    vehicleDeviceMap.set(mapping.routePatternId, {
+      deviceId: mapping.deviceId,
+      routePatternId: mapping.routePatternId,
+      externalRouteId: mapping.externalRouteId,
+    });
+  }
+
+  const realtime = await resolveRealtimeSignal(provisional, vehicleDeviceMap, db, now);
+  const status = buildExecutionStatus(session.id, snapshot, { realtime }, now);
 
   await db.executionSession.update({
     where: { id: session.id },

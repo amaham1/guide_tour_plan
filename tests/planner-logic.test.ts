@@ -140,6 +140,51 @@ describe("execution realtime fallback", () => {
     expect(status.notice).toContain("시간표 기준");
     expect(status.status).toBe("ACTIVE");
   });
+
+  it("applies realtime to an upcoming ride leg while the user is still walking", () => {
+    const status = buildExecutionStatus(
+      "session-2",
+      {
+        summary,
+        legs: [
+          {
+            id: "walk-1",
+            kind: "walk",
+            title: "정류장까지 이동",
+            startAt: "2026-03-23T09:55:00.000Z",
+            endAt: "2026-03-23T10:05:00.000Z",
+            durationMinutes: 10,
+            timeReliability: "OFFICIAL",
+          },
+          {
+            id: "ride-1",
+            kind: "ride",
+            title: "111번 탑승",
+            startAt: "2026-03-23T10:10:00.000Z",
+            endAt: "2026-03-23T10:40:00.000Z",
+            durationMinutes: 30,
+            routePatternId: "pattern-111",
+            timeReliability: "OFFICIAL",
+          },
+        ],
+      },
+      {
+        realtime: {
+          applied: true,
+          delayMinutes: 7,
+          replacementSuggested: false,
+          notice: "실시간 GNSS 기준 약 7분 지연입니다.",
+          reason: "GNSS",
+        },
+      },
+      new Date("2026-03-23T10:00:00.000Z"),
+    );
+
+    expect(status.realtimeApplied).toBe(true);
+    expect(status.delayMinutes).toBe(7);
+    expect(status.nextActionAt).toBe("2026-03-23T10:17:00.000Z");
+    expect(status.notice).toContain("7분 지연");
+  });
 });
 
 describe("planner engine long-distance routing", () => {

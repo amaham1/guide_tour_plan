@@ -42,11 +42,23 @@ describe("gnss-history job", () => {
     ]);
 
     const createMany = vi.fn();
+    const deleteMany = vi.fn().mockResolvedValue({ count: 1 });
     const runtime = {
       env: {
         dataGoKrServiceKey: "service-key",
       },
       prisma: {
+        vehicleDeviceMap: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              deviceId: "bus-1",
+              routePatternId: "pattern-1",
+              externalRouteId: "405320214",
+              confidence: 0.98,
+              refreshedAt: new Date("2026-03-24T07:59:00+09:00"),
+            },
+          ]),
+        },
         gnssObservation: {
           findMany: vi.fn().mockResolvedValue([
             {
@@ -57,6 +69,7 @@ describe("gnss-history job", () => {
             },
           ]),
           createMany,
+          deleteMany,
         },
       },
     } as never;
@@ -68,6 +81,9 @@ describe("gnss-history job", () => {
       data: [
         expect.objectContaining({
           deviceId: "bus-1",
+          routePatternId: "pattern-1",
+          externalRouteId: "405320214",
+          source: "DATA_GO_KR_GNSS",
           latitude: 33.51,
           longitude: 126.51,
         }),
@@ -86,6 +102,7 @@ describe("gnss-history job", () => {
     ]);
 
     const createMany = vi.fn();
+    const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
     const runtime = {
       env: {
         dataGoKrServiceKey: "service-key",
@@ -94,13 +111,18 @@ describe("gnss-history job", () => {
         vehicleDeviceMap: {
           findMany: vi.fn().mockResolvedValue([
             {
+              routePatternId: "pattern-202",
+              deviceId: "7983169",
               externalRouteId: "405320214",
+              confidence: 0.98,
+              refreshedAt: new Date("2026-03-24T08:00:00+09:00"),
             },
           ]),
         },
         gnssObservation: {
           findMany: vi.fn().mockResolvedValue([]),
           createMany,
+          deleteMany,
         },
       },
     } as never;
@@ -120,6 +142,9 @@ describe("gnss-history job", () => {
       data: [
         expect.objectContaining({
           deviceId: "7983169",
+          routePatternId: "pattern-202",
+          externalRouteId: "405320214",
+          source: "BUS_JEJU_REALTIME",
           latitude: 33.5,
           longitude: 126.5,
         }),

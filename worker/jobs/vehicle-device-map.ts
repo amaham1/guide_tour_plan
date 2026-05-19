@@ -126,8 +126,8 @@ export async function runVehicleDeviceMapJob(
   const patterns = await runtime.prisma.routePattern.findMany({
     where: {
       isActive: true,
-      trips: {
-        some: {},
+      route: {
+        isActive: true,
       },
     },
     include: {

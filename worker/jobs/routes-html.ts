@@ -228,6 +228,7 @@ type RoutesHtmlItemResult = {
     stopCount: number;
     reason: string;
     reasonSubtype: string;
+    retryable: boolean;
     bestCandidate: {
       routePatternId: string;
       shortName: string;
@@ -281,6 +282,22 @@ type RoutesHtmlRejectionBreakdown = {
   reasonSubtype: string;
   count: number;
 };
+
+function isRetryableProcessingError(reason: string) {
+  return /timeout|timed out|fetch failed|terminated|socket|network|abort|und_err/i.test(reason);
+}
+
+function classifyProcessingErrorSubtype(reason: string) {
+  if (/timeout|timed out|abort/i.test(reason)) {
+    return "processing_error(timeout)";
+  }
+
+  if (/fetch failed|socket|network|terminated|und_err/i.test(reason)) {
+    return "processing_error(fetch failed)";
+  }
+
+  return "processing_error";
+}
 
 function isUsableStopProfile(profile: VariantStopProfile, richestStopCount: number) {
   if (profile.stopNames.length < 2) {
@@ -677,6 +694,7 @@ async function processDiscoveredSchedule(
           stopCount,
           reason,
           reasonSubtype: classifyRejectionSubtype(reason, stopCount, bestNearMiss?.candidate ?? null),
+          retryable: false,
           bestCandidate: bestNearMiss?.candidate ?? null,
           sampleStopNames: bestNearMiss?.sampleStopNames ?? [],
           tripCount: bestNearMiss?.tripCount ?? 0,
@@ -757,7 +775,12 @@ async function processDiscoveredSchedule(
       shortName: item.shortName,
       stopCount: 0,
       reason: error instanceof Error ? error.message : "UNKNOWN_ERROR",
-      reasonSubtype: "processing_error",
+      reasonSubtype: classifyProcessingErrorSubtype(
+        error instanceof Error ? error.message : "UNKNOWN_ERROR",
+      ),
+      retryable: isRetryableProcessingError(
+        error instanceof Error ? error.message : "UNKNOWN_ERROR",
+      ),
       bestCandidate: null,
       sampleStopNames: [],
       tripCount: 0,

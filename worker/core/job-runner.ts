@@ -12,6 +12,7 @@ const defaultRunAllOrder = [
   "routes-html",
   "route-geometries",
   "timetables-xlsx",
+  "observed-timetables",
   "walk-links",
   "vehicle-device-map",
   "transit-audit",
@@ -20,6 +21,8 @@ const defaultRunAllOrder = [
 
 const followUpJobsByKey: Record<string, readonly string[]> = {
   "routes-html": ["timetables-xlsx"],
+  "timetables-xlsx": ["observed-timetables"],
+  "segment-profiles": ["observed-timetables"],
 };
 
 type RunOptions = {

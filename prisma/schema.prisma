@@ -132,6 +132,7 @@ model Stop {
   latitude          Float
   longitude         Float
   derivedStopTimes  DerivedStopTime[]
+  observedStopPassages ObservedStopPassage[]
   translations      StopTranslation[]
   projections       RoutePatternStopProjection[]
   routePatternStops RoutePatternStop[]
@@ -184,6 +185,7 @@ model RoutePattern {
   segmentProfiles  SegmentTravelProfile[]
   trips            Trip[]
   vehicleDeviceMaps VehicleDeviceMap[]
+  observedStopPassages ObservedStopPassage[]
 
   @@unique([externalRouteId, directionCode, waypointOrder])
 }
@@ -301,11 +303,15 @@ model DerivedStopTime {
   confidence          Float              @default(0)
   anchorStartSequence Int?
   anchorEndSequence   Int?
+  sourceSampleCount   Int?
+  sourceBucketStartMinute Int?
+  sourceServiceDayClass ServiceDayClass?
   trip                Trip               @relation(fields: [tripId], references: [id], onDelete: Cascade)
   stop                Stop               @relation(fields: [stopId], references: [id], onDelete: Cascade)
 
-  @@unique([tripId, sequence])
+  @@unique([tripId, sequence, timeSource])
   @@index([stopId, departureMinutes])
+  @@index([timeSource])
 }
 
 model WalkLink {
@@ -347,6 +353,9 @@ model VehicleDeviceMap {
 model GnssObservation {
   id          String   @id @default(cuid())
   deviceId    String
+  routePatternId String?
+  externalRouteId String?
+  source      String?
   observedAt  DateTime
   collectedAt DateTime @default(now())
   latitude    Float
@@ -355,6 +364,31 @@ model GnssObservation {
 
   @@unique([deviceId, observedAt, latitude, longitude])
   @@index([deviceId, observedAt])
+  @@index([routePatternId, observedAt])
+  @@index([observedAt])
+}
+
+model ObservedStopPassage {
+  id            String          @id @default(cuid())
+  routePatternId String
+  stopId        String
+  sequence      Int
+  deviceId      String
+  observedAt    DateTime
+  serviceDayClass ServiceDayClass
+  bucketStartMinute Int
+  source        String
+  externalRouteId String?
+  offsetMeters  Int?
+  snapDistanceMeters Int?
+  confidence    Float           @default(0)
+  createdAt     DateTime        @default(now())
+  routePattern  RoutePattern    @relation(fields: [routePatternId], references: [id], onDelete: Cascade)
+  stop          Stop            @relation(fields: [stopId], references: [id], onDelete: Cascade)
+
+  @@unique([routePatternId, sequence, deviceId, observedAt])
+  @@index([routePatternId, serviceDayClass, bucketStartMinute])
+  @@index([stopId, observedAt])
   @@index([observedAt])
 }
 
