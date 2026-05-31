@@ -1,6 +1,12 @@
 import { notFound } from "next/navigation";
 import { Clock3, Footprints, RefreshCw, Shuffle } from "lucide-react";
 import { ResultsActions } from "@/components/planner/results-actions";
+import {
+  formatTimeRange,
+  timeReliabilityLabel,
+  timeReliabilityModeLabel,
+  timeReliabilityNote,
+} from "@/components/planner/time-display";
 import { getPlannerResult } from "@/features/planner/service";
 import { formatClock, formatDateTime, formatDuration } from "@/lib/utils";
 
@@ -10,51 +16,6 @@ const metricIcons = {
   transfer: Shuffle,
   realtime: RefreshCw,
 };
-
-function timeReliabilityModeLabel(mode: string) {
-  switch (mode) {
-    case "OFFICIAL_ONLY":
-      return "공식만";
-    case "INCLUDE_ESTIMATED":
-      return "추정 포함";
-    case "ALLOW_ROUGH":
-      return "대략까지 허용";
-    default:
-      return mode;
-  }
-}
-
-function timeReliabilityLabel(reliability: string) {
-  switch (reliability) {
-    case "OFFICIAL":
-      return "공식";
-    case "ESTIMATED":
-      return "추정";
-    case "ROUGH":
-      return "대략";
-    default:
-      return reliability;
-  }
-}
-
-function timeReliabilityNote(reliability: string) {
-  switch (reliability) {
-    case "ESTIMATED":
-      return "Interpolated between official anchor stops.";
-    case "ROUGH":
-      return "Range only. Realtime adjustment is not applied.";
-    default:
-      return null;
-  }
-}
-
-function formatTimeRange(startAt: string | null | undefined, endAt: string | null | undefined) {
-  if (!startAt || !endAt) {
-    return null;
-  }
-
-  return `${formatClock(startAt)} - ${formatClock(endAt)}`;
-}
 
 export default async function PlannerResultsPage({
   params,
@@ -270,6 +231,3 @@ export default async function PlannerResultsPage({
     </main>
   );
 }
-
-
-

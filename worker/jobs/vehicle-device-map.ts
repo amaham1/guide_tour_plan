@@ -1,4 +1,5 @@
 import { loadStructuredSource } from "@/worker/core/files";
+import { mapWithConcurrency } from "@/worker/core/concurrency";
 import type { WorkerRuntime } from "@/worker/core/runtime";
 import {
   extractArray,
@@ -67,20 +68,6 @@ function normalizeRealtimeVehicleRow(
     externalRouteId: pattern.externalRouteId,
     confidence: 0.98,
   };
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  mapper: (item: T) => Promise<R>,
-) {
-  const results: R[] = [];
-  for (let index = 0; index < items.length; index += limit) {
-    const chunk = items.slice(index, index + limit);
-    const resolved = await Promise.all(chunk.map((item) => mapper(item)));
-    results.push(...resolved);
-  }
-  return results;
 }
 
 async function loadOfficialRealtimeVehicleMapRows(

@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { syncSourceCatalog } from "@/lib/source-catalog";
+import { getMetaArray, getMetaRecord } from "@/features/admin/dashboard-meta";
 import { getPlannerCatalogStatus } from "@/features/planner/catalog";
 
 export async function getAdminDashboard() {
@@ -426,22 +427,13 @@ export async function getAdminDashboard() {
   const latestGnssHistoryRun = runs.find((run) => run.job.key === "gnss-history");
   const latestSegmentProfilesRun = runs.find((run) => run.job.key === "segment-profiles");
   const latestObservedTimetablesRun = runs.find((run) => run.job.key === "observed-timetables");
-  const routeGeometryMeta =
-    latestRouteGeometryRun?.meta && typeof latestRouteGeometryRun.meta === "object"
-      ? (latestRouteGeometryRun.meta as Record<string, unknown>)
-      : null;
-  const routesHtmlMeta =
-    latestRoutesHtmlRun?.meta && typeof latestRoutesHtmlRun.meta === "object"
-      ? (latestRoutesHtmlRun.meta as Record<string, unknown>)
-      : null;
+  const routeGeometryMeta = getMetaRecord(latestRouteGeometryRun?.meta);
+  const routesHtmlMeta = getMetaRecord(latestRoutesHtmlRun?.meta);
   const latestRoutesHtmlAt =
     latestRoutesHtmlRun?.endedAt ?? latestRoutesHtmlRun?.startedAt ?? null;
   const latestTimetablesXlsxAt =
     latestTimetablesXlsxRun?.endedAt ?? latestTimetablesXlsxRun?.startedAt ?? null;
-  const timetablesXlsxMeta =
-    latestTimetablesXlsxRun?.meta && typeof latestTimetablesXlsxRun.meta === "object"
-      ? (latestTimetablesXlsxRun.meta as Record<string, unknown>)
-      : null;
+  const timetablesXlsxMeta = getMetaRecord(latestTimetablesXlsxRun?.meta);
   const timetableSyncStatus = !latestRoutesHtmlAt
     ? "idle"
     : latestTimetablesXlsxRun?.status === "RUNNING" &&
@@ -462,31 +454,15 @@ export async function getAdminDashboard() {
         )
       : null;
   const mappedPatternCount = new Set(vehicleMaps.map((item) => item.routePatternId)).size;
-  const matchedVariants = Array.isArray(routesHtmlMeta?.matchedVariants)
-    ? routesHtmlMeta.matchedVariants
-    : [];
-  const unmatchedVariants = Array.isArray(routesHtmlMeta?.unmatchedVariants)
-    ? routesHtmlMeta.unmatchedVariants
-    : [];
-  const skippedSpecialSchedules = Array.isArray(routesHtmlMeta?.skippedSpecialSchedules)
-    ? routesHtmlMeta.skippedSpecialSchedules
-    : [];
-  const matchedRouteLabels = Array.isArray(routesHtmlMeta?.matchedRouteLabels)
-    ? routesHtmlMeta.matchedRouteLabels
-    : [];
-  const unmatchedRouteLabels = Array.isArray(routesHtmlMeta?.unmatchedRouteLabels)
-    ? routesHtmlMeta.unmatchedRouteLabels
-    : [];
+  const matchedVariants = getMetaArray(routesHtmlMeta, "matchedVariants");
+  const unmatchedVariants = getMetaArray(routesHtmlMeta, "unmatchedVariants");
+  const skippedSpecialSchedules = getMetaArray(routesHtmlMeta, "skippedSpecialSchedules");
+  const matchedRouteLabels = getMetaArray(routesHtmlMeta, "matchedRouteLabels");
+  const unmatchedRouteLabels = getMetaArray(routesHtmlMeta, "unmatchedRouteLabels");
   const nearMisses = Array.isArray(routesHtmlMeta?.nearMisses) ? routesHtmlMeta.nearMisses : [];
-  const rejectionBreakdown = Array.isArray(routesHtmlMeta?.rejectionBreakdown)
-    ? routesHtmlMeta.rejectionBreakdown
-    : [];
-  const resolvedMixedVariantSchedules = Array.isArray(routesHtmlMeta?.resolvedMixedVariantSchedules)
-    ? routesHtmlMeta.resolvedMixedVariantSchedules
-    : [];
-  const unresolvedMixedVariantSchedules = Array.isArray(routesHtmlMeta?.unresolvedMixedVariantSchedules)
-    ? routesHtmlMeta.unresolvedMixedVariantSchedules
-    : [];
+  const rejectionBreakdown = getMetaArray(routesHtmlMeta, "rejectionBreakdown");
+  const resolvedMixedVariantSchedules = getMetaArray(routesHtmlMeta, "resolvedMixedVariantSchedules");
+  const unresolvedMixedVariantSchedules = getMetaArray(routesHtmlMeta, "unresolvedMixedVariantSchedules");
   const inheritedVariantRowCount =
     typeof routesHtmlMeta?.inheritedVariantRowCount === "number"
       ? routesHtmlMeta.inheritedVariantRowCount
@@ -527,15 +503,13 @@ export async function getAdminDashboard() {
     typeof timetablesXlsxMeta?.eligibleButUnfilledTrips === "number"
       ? timetablesXlsxMeta.eligibleButUnfilledTrips
       : 0;
-  const skipReasonBreakdown = Array.isArray(timetablesXlsxMeta?.skipReasonBreakdown)
-    ? timetablesXlsxMeta.skipReasonBreakdown.filter(
-        (item): item is { reason: string; count: number } =>
-          Boolean(item) &&
-          typeof item === "object" &&
-          typeof item.reason === "string" &&
-          typeof item.count === "number",
-      )
-    : [];
+  const skipReasonBreakdown = getMetaArray(timetablesXlsxMeta, "skipReasonBreakdown").filter(
+    (item): item is { reason: string; count: number } =>
+      Boolean(item) &&
+      typeof item === "object" &&
+      typeof item.reason === "string" &&
+      typeof item.count === "number",
+  );
 
   return {
     catalogStatus,

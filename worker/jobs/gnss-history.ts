@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { fetchGnssRecords, toTimestamp } from "@/features/planner/realtime-source";
+import { mapWithConcurrency } from "@/worker/core/concurrency";
 import { fetchBusJejuRealtimePositions } from "@/worker/jobs/bus-jeju-live";
 import type { WorkerRuntime } from "@/worker/core/runtime";
 import { normalizeText, toNumber } from "@/worker/jobs/helpers";
@@ -37,21 +38,6 @@ function buildObservationKey(item: {
   longitude: number;
 }) {
   return `${item.deviceId}:${item.observedAt.toISOString()}:${item.latitude.toFixed(6)}:${item.longitude.toFixed(6)}`;
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  mapper: (item: T) => Promise<R>,
-) {
-  const results: R[] = [];
-  for (let index = 0; index < items.length; index += limit) {
-    const chunk = items.slice(index, index + limit);
-    const resolved = await Promise.all(chunk.map((item) => mapper(item)));
-    results.push(...resolved);
-  }
-
-  return results;
 }
 
 async function fetchBusJejuGnssFallback(runtime: WorkerRuntime) {

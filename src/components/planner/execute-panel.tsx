@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Bus, Clock3, Footprints, LocateFixed } from "lucide-react";
 import type { ExecutionStatusDto } from "@/features/planner/types";
+import { formatLegStart, formatLegTime, legReliabilityNote } from "@/components/planner/time-display";
 import { formatClock, formatDuration } from "@/lib/utils";
 
 type ExecutePanelProps = {
@@ -23,34 +24,6 @@ function formatCountdown(nextActionAt: string | null, now: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-function formatLegTime(leg: ExecutionStatusDto["legs"][number]) {
-  if (leg.timeReliability === "ROUGH" && leg.startWindowAt && leg.endWindowAt) {
-    return `${formatClock(leg.startWindowAt)} - ${formatClock(leg.endWindowAt)}`;
-  }
-
-  return `${formatClock(leg.startAt)} - ${formatClock(leg.endAt)}`;
-}
-
-function formatLegStart(leg: ExecutionStatusDto["legs"][number]) {
-  if (leg.timeReliability === "ROUGH" && leg.startWindowAt && leg.endWindowAt) {
-    return `${formatClock(leg.startWindowAt)} - ${formatClock(leg.endWindowAt)}`;
-  }
-
-  return formatClock(leg.startAt);
-}
-
-function legReliabilityNote(leg: ExecutionStatusDto["legs"][number]) {
-  if (leg.timeReliability === "ESTIMATED") {
-    return "공식 anchor 사이를 보간한 시각입니다.";
-  }
-
-  if (leg.timeReliability === "ROUGH") {
-    return "대략 범위만 제공하며 실시간 보정은 적용하지 않습니다.";
-  }
-
-  return null;
 }
 
 function realtimeReasonLabel(reason: string | null | undefined) {

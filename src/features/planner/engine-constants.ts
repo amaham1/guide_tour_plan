@@ -1,0 +1,14 @@
+export const ACCESS_STOP_LIMIT = 12;
+export const MAX_PLACE_STOP_WALK_MINUTES = 25;
+export const MIN_SEARCH_WINDOW_MINUTES = 90;
+export const MAX_SEARCH_WINDOW_MINUTES = 210;
+export const SEGMENT_OPTION_LIMIT = 12;
+export const SEGMENT_OPTIONS_PER_PARTIAL = 8;
+export const PARTIAL_FRONTIER_LIMIT = 72;
+export const MAX_RIDE_ROUNDS = 5;
+export const FIRST_BOARD_BUFFER = 5;
+export const TRANSFER_BUFFER = 4;
+export const ESTIMATED_BUFFER = 6;
+export const ROUGH_BUFFER = 12;
+export const MAX_SEGMENT_RESULT_DURATION_MINUTES = MAX_SEARCH_WINDOW_MINUTES + 120;
+export const SERVICE_UTC_OFFSET_MINUTES = 9 * 60;

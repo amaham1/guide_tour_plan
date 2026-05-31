@@ -1,5 +1,6 @@
 import { fetchPlainText } from "@/worker/core/fetch";
 import { isExcludedTransitRoute } from "@/lib/transit-route-policy";
+import { mapWithConcurrency } from "@/worker/core/concurrency";
 import type { WorkerRuntime } from "@/worker/core/runtime";
 import {
   parseRouteDetailHtml,
@@ -170,34 +171,6 @@ function buildSourceLabel(baseLabel: string, variant: ParsedScheduleVariant) {
   }
 
   return `${baseLabel} [${variant.rawVariantLabel}]`;
-}
-
-async function mapWithConcurrency<T, R>(
-  values: T[],
-  concurrency: number,
-  mapper: (value: T, index: number) => Promise<R>,
-) {
-  const results = new Array<R>(values.length);
-  let nextIndex = 0;
-
-  async function worker() {
-    while (true) {
-      const currentIndex = nextIndex;
-      nextIndex += 1;
-
-      if (currentIndex >= values.length) {
-        return;
-      }
-
-      results[currentIndex] = await mapper(values[currentIndex], currentIndex);
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, values.length) }, () => worker()),
-  );
-
-  return results;
 }
 
 function isAcceptedScheduleMatch(

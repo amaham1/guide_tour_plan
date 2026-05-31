@@ -159,7 +159,7 @@ async function ensureDockerAvailable() {
     await runCommand("docker", ["compose", "version"], { captureOutput: true });
   } catch (error) {
     throw new Error(
-      `Docker Compose를 사용할 수 없습니다. Docker Desktop이 실행 중인지 확인해 주세요. 원인: ${formatCause(error)}`,
+      `Docker Compose is not available. Start Docker Desktop and try again. Cause: ${formatCause(error)}`,
     );
   }
 }

@@ -1,13 +1,18 @@
 import { ServiceDayClass } from "@prisma/client";
-import { percentile, projectPointOntoPolyline, type GeoPoint } from "@/lib/geometry";
+import { percentile, type GeoPoint } from "@/lib/geometry";
+import {
+  buildProjectedTraces,
+  createDiagnostics,
+  isHighFrequencyTrace,
+  LOW_FREQUENCY_TRACE_GAP_MS,
+  MAX_SEGMENT_SPEED_KPH,
+  splitObservations,
+} from "@/worker/jobs/segment-profile-traces";
 import { matchTraceGeometry } from "@/lib/osrm";
 import { median } from "@/worker/jobs/helpers";
 import type { WorkerRuntime } from "@/worker/core/runtime";
 import type { JobOutcome } from "@/worker/jobs/types";
 
-const TRACE_GAP_MS = 90_000;
-const MAX_OBSERVATION_SNAP_DISTANCE_METERS = 250;
-const MAX_SEGMENT_SPEED_KPH = 90;
 const SEGMENT_WINDOW_DAYS = 28;
 const STOP_PASSAGE_RETENTION_DAYS = 45;
 const MIN_MATCH_CONFIDENCE = 0.8;
@@ -15,11 +20,6 @@ const MIN_SEGMENT_SAMPLE_COUNT = 5;
 const TURN_PENALTY_SHARE = 0.35;
 const MAX_TURN_PENALTY_SEC = 45;
 
-type TraceObservation = {
-  observedAt: Date;
-  latitude: number;
-  longitude: number;
-};
 
 function toServiceDayClass(date: Date) {
   const day = date.getDay();
@@ -37,29 +37,6 @@ function toServiceDayClass(date: Date) {
 function toBucketStartMinute(date: Date) {
   const totalMinutes = date.getHours() * 60 + date.getMinutes();
   return Math.floor(totalMinutes / 15) * 15;
-}
-
-function splitObservations(rows: TraceObservation[]) {
-  const traces: TraceObservation[][] = [];
-  let current: TraceObservation[] = [];
-
-  for (const row of rows) {
-    const previous = current[current.length - 1];
-    if (previous && row.observedAt.getTime() - previous.observedAt.getTime() > TRACE_GAP_MS) {
-      if (current.length >= 2) {
-        traces.push(current);
-      }
-      current = [];
-    }
-
-    current.push(row);
-  }
-
-  if (current.length >= 2) {
-    traces.push(current);
-  }
-
-  return traces;
 }
 
 export function collectTurnTriples(nodes: number[]) {
@@ -196,6 +173,7 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
     }
   >();
   const routePatternIds = new Set<string>();
+  const diagnostics = createDiagnostics();
 
   for (const mapping of mappings) {
     const geometry = parseGeometryCoordinates(mapping.routePattern.geometry?.geometry ?? null);
@@ -204,9 +182,25 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
     }
 
     routePatternIds.add(mapping.routePatternId);
+    const routeContextFilters: Array<{
+      routePatternId?: string | null;
+      externalRouteId?: string | null;
+    }> = [
+      {
+        routePatternId: mapping.routePatternId,
+      },
+    ];
+    if (mapping.externalRouteId) {
+      routeContextFilters.push({
+        routePatternId: null,
+        externalRouteId: mapping.externalRouteId,
+      });
+    }
+
     const observations = await runtime.prisma.gnssObservation.findMany({
       where: {
         deviceId: mapping.deviceId,
+        OR: routeContextFilters,
         observedAt: {
           gte: since,
         },
@@ -220,193 +214,180 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
       continue;
     }
 
+    diagnostics.rawObservationCount += observations.length;
     const traces = splitObservations(
       observations.map((row) => ({
         observedAt: row.observedAt,
         latitude: row.latitude,
         longitude: row.longitude,
       })),
+      diagnostics,
     );
 
     for (const trace of traces) {
-      const matches = await matchTraceGeometry(
-        runtime.env.osrmBusEtaBaseUrl,
-        "driving",
-        trace.map((row) => ({
-          latitude: row.latitude,
-          longitude: row.longitude,
-        })),
-        {
-          timestamps: trace.map((row) => Math.floor(row.observedAt.getTime() / 1000)),
-          radiuses: trace.map(() => 50),
-        },
-      ).catch(() => []);
+      if (isHighFrequencyTrace(trace)) {
+        const matches = await matchTraceGeometry(
+          runtime.env.osrmBusEtaBaseUrl,
+          "driving",
+          trace.map((row) => ({
+            latitude: row.latitude,
+            longitude: row.longitude,
+          })),
+          {
+            timestamps: trace.map((row) => Math.floor(row.observedAt.getTime() / 1000)),
+            radiuses: trace.map(() => 50),
+          },
+        ).catch(() => {
+          diagnostics.osrmMatchFailureCount += 1;
+          return [];
+        });
 
-      const bestMatch = matches.sort((left, right) => right.confidence - left.confidence)[0];
-      if (!bestMatch || bestMatch.confidence < MIN_MATCH_CONFIDENCE) {
-        continue;
+        const bestMatch = matches.sort((left, right) => right.confidence - left.confidence)[0];
+        if (bestMatch && bestMatch.confidence >= MIN_MATCH_CONFIDENCE) {
+          diagnostics.osrmMatchedTraceCount += 1;
+          const traceObservedDurationSec = Math.round(
+            (trace[trace.length - 1]!.observedAt.getTime() - trace[0]!.observedAt.getTime()) /
+              1000,
+          );
+          const turnPenaltyBudgetSec = Math.round(
+            Math.max(0, traceObservedDurationSec - bestMatch.durationSeconds) * TURN_PENALTY_SHARE,
+          );
+          const turnTriples = collectTurnTriples(bestMatch.nodes);
+          if (turnPenaltyBudgetSec > 0 && turnTriples.length > 0) {
+            const serviceDayClass = toServiceDayClass(trace[0]!.observedAt);
+            const bucketStartMinute = toBucketStartMinute(trace[0]!.observedAt);
+            const perTurnPenaltySec = Math.min(
+              MAX_TURN_PENALTY_SEC,
+              Math.max(1, Math.round(turnPenaltyBudgetSec / turnTriples.length)),
+            );
+
+            for (const turn of turnTriples) {
+              const key = [
+                turn.fromOsmNodeId,
+                turn.viaOsmNodeId,
+                turn.toOsmNodeId,
+                serviceDayClass,
+                bucketStartMinute,
+              ].join(":");
+              const aggregate = turnAggregates.get(key) ?? {
+                fromOsmNodeId: turn.fromOsmNodeId,
+                viaOsmNodeId: turn.viaOsmNodeId,
+                toOsmNodeId: turn.toOsmNodeId,
+                serviceDayClass,
+                bucketStartMinute,
+                penaltiesSec: [],
+              };
+              aggregate.penaltiesSec.push(perTurnPenaltySec);
+              turnAggregates.set(key, aggregate);
+            }
+          }
+        } else {
+          diagnostics.osrmLowConfidenceCount += 1;
+        }
+      } else {
+        diagnostics.osrmSkippedLowFrequencyTraceCount += 1;
       }
 
-      const traceObservedDurationSec = Math.round(
-        (trace[trace.length - 1]!.observedAt.getTime() - trace[0]!.observedAt.getTime()) / 1000,
-      );
-      const turnPenaltyBudgetSec = Math.round(
-        Math.max(0, traceObservedDurationSec - bestMatch.durationSeconds) * TURN_PENALTY_SHARE,
-      );
-      const turnTriples = collectTurnTriples(bestMatch.nodes);
-      if (turnPenaltyBudgetSec > 0 && turnTriples.length > 0) {
-        const serviceDayClass = toServiceDayClass(trace[0]!.observedAt);
-        const bucketStartMinute = toBucketStartMinute(trace[0]!.observedAt);
-        const perTurnPenaltySec = Math.min(
-          MAX_TURN_PENALTY_SEC,
-          Math.max(1, Math.round(turnPenaltyBudgetSec / turnTriples.length)),
-        );
+      const projectedTraces = buildProjectedTraces(trace, geometry, diagnostics);
 
-        for (const turn of turnTriples) {
+      for (const projectedTrace of projectedTraces) {
+        const stopPassTimes = new Map<number, Date>();
+        for (let index = 1; index < projectedTrace.length; index += 1) {
+          const start = projectedTrace[index - 1];
+          const end = projectedTrace[index];
+          if (end.offsetMeters <= start.offsetMeters) {
+            continue;
+          }
+
+          for (const stopProjection of mapping.routePattern.stopProjections) {
+            if (stopPassTimes.has(stopProjection.sequence)) {
+              continue;
+            }
+
+            if (
+              stopProjection.offsetMeters < start.offsetMeters ||
+              stopProjection.offsetMeters > end.offsetMeters
+            ) {
+              continue;
+            }
+
+            const timestamp = interpolateTimestamp(start, end, stopProjection.offsetMeters);
+            if (timestamp) {
+              stopPassTimes.set(stopProjection.sequence, timestamp);
+            }
+          }
+        }
+
+        diagnostics.stopPassageCandidateCount += stopPassTimes.size;
+
+        for (const stopProjection of mapping.routePattern.stopProjections) {
+          const observedAt = stopPassTimes.get(stopProjection.sequence);
+          if (!observedAt) {
+            continue;
+          }
+
           const key = [
-            turn.fromOsmNodeId,
-            turn.viaOsmNodeId,
-            turn.toOsmNodeId,
+            mapping.routePatternId,
+            stopProjection.sequence,
+            mapping.deviceId,
+            observedAt.toISOString(),
+          ].join(":");
+          observedStopPassages.set(key, {
+            routePatternId: mapping.routePatternId,
+            stopId: stopProjection.stopId,
+            sequence: stopProjection.sequence,
+            deviceId: mapping.deviceId,
+            observedAt,
+            serviceDayClass: toServiceDayClass(observedAt),
+            bucketStartMinute: toBucketStartMinute(observedAt),
+            source: "GNSS_TRACE",
+            externalRouteId: mapping.externalRouteId,
+            offsetMeters: stopProjection.offsetMeters,
+            snapDistanceMeters: stopProjection.snapDistanceMeters,
+            confidence: stopProjection.confidence,
+          });
+        }
+
+        for (let index = 1; index < mapping.routePattern.stopProjections.length; index += 1) {
+          const from = mapping.routePattern.stopProjections[index - 1];
+          const to = mapping.routePattern.stopProjections[index];
+          const fromTime = stopPassTimes.get(from.sequence);
+          const toTime = stopPassTimes.get(to.sequence);
+          if (!fromTime || !toTime || toTime <= fromTime) {
+            continue;
+          }
+
+          const durationSec = Math.round((toTime.getTime() - fromTime.getTime()) / 1000);
+          const segmentDistanceMeters = Math.max(1, to.offsetMeters - from.offsetMeters);
+          const speedKph = (segmentDistanceMeters / durationSec) * 3.6;
+          if (!Number.isFinite(speedKph) || speedKph > MAX_SEGMENT_SPEED_KPH) {
+            diagnostics.speedRejectedObservationCount += 1;
+            continue;
+          }
+
+          const serviceDayClass = toServiceDayClass(fromTime);
+          const bucketStartMinute = toBucketStartMinute(fromTime);
+          const key = [
+            mapping.routePatternId,
+            from.sequence,
+            to.sequence,
             serviceDayClass,
             bucketStartMinute,
           ].join(":");
-          const aggregate = turnAggregates.get(key) ?? {
-            fromOsmNodeId: turn.fromOsmNodeId,
-            viaOsmNodeId: turn.viaOsmNodeId,
-            toOsmNodeId: turn.toOsmNodeId,
+
+          const aggregate = aggregates.get(key) ?? {
+            routePatternId: mapping.routePatternId,
+            fromSequence: from.sequence,
+            toSequence: to.sequence,
             serviceDayClass,
             bucketStartMinute,
-            penaltiesSec: [],
+            segmentDistanceMeters,
+            durationsSec: [],
           };
-          aggregate.penaltiesSec.push(perTurnPenaltySec);
-          turnAggregates.set(key, aggregate);
+          aggregate.durationsSec.push(durationSec);
+          diagnostics.segmentSampleCount += 1;
+          aggregates.set(key, aggregate);
         }
-      }
-
-      const projectedTrace = trace
-        .map((row) => {
-          const projection = projectPointOntoPolyline(
-            {
-              latitude: row.latitude,
-              longitude: row.longitude,
-            },
-            geometry,
-          );
-
-          if (!projection || projection.distanceMeters > MAX_OBSERVATION_SNAP_DISTANCE_METERS) {
-            return null;
-          }
-
-          return {
-            observedAt: row.observedAt,
-            offsetMeters: projection.offsetMeters,
-          };
-        })
-        .filter(
-          (
-            row,
-          ): row is {
-            observedAt: Date;
-            offsetMeters: number;
-          } => row !== null,
-        );
-
-      if (projectedTrace.length < 2) {
-        continue;
-      }
-
-      const stopPassTimes = new Map<number, Date>();
-      for (let index = 1; index < projectedTrace.length; index += 1) {
-        const start = projectedTrace[index - 1];
-        const end = projectedTrace[index];
-        if (end.offsetMeters <= start.offsetMeters) {
-          continue;
-        }
-
-        for (const stopProjection of mapping.routePattern.stopProjections) {
-          if (stopPassTimes.has(stopProjection.sequence)) {
-            continue;
-          }
-
-          if (
-            stopProjection.offsetMeters < start.offsetMeters ||
-            stopProjection.offsetMeters > end.offsetMeters
-          ) {
-            continue;
-          }
-
-          const timestamp = interpolateTimestamp(start, end, stopProjection.offsetMeters);
-          if (timestamp) {
-            stopPassTimes.set(stopProjection.sequence, timestamp);
-          }
-        }
-      }
-
-      for (const stopProjection of mapping.routePattern.stopProjections) {
-        const observedAt = stopPassTimes.get(stopProjection.sequence);
-        if (!observedAt) {
-          continue;
-        }
-
-        const key = [
-          mapping.routePatternId,
-          stopProjection.sequence,
-          mapping.deviceId,
-          observedAt.toISOString(),
-        ].join(":");
-        observedStopPassages.set(key, {
-          routePatternId: mapping.routePatternId,
-          stopId: stopProjection.stopId,
-          sequence: stopProjection.sequence,
-          deviceId: mapping.deviceId,
-          observedAt,
-          serviceDayClass: toServiceDayClass(observedAt),
-          bucketStartMinute: toBucketStartMinute(observedAt),
-          source: "GNSS_TRACE",
-          externalRouteId: mapping.externalRouteId,
-          offsetMeters: stopProjection.offsetMeters,
-          snapDistanceMeters: stopProjection.snapDistanceMeters,
-          confidence: stopProjection.confidence,
-        });
-      }
-
-      for (let index = 1; index < mapping.routePattern.stopProjections.length; index += 1) {
-        const from = mapping.routePattern.stopProjections[index - 1];
-        const to = mapping.routePattern.stopProjections[index];
-        const fromTime = stopPassTimes.get(from.sequence);
-        const toTime = stopPassTimes.get(to.sequence);
-        if (!fromTime || !toTime || toTime <= fromTime) {
-          continue;
-        }
-
-        const durationSec = Math.round((toTime.getTime() - fromTime.getTime()) / 1000);
-        const segmentDistanceMeters = Math.max(1, to.offsetMeters - from.offsetMeters);
-        const speedKph = (segmentDistanceMeters / durationSec) * 3.6;
-        if (!Number.isFinite(speedKph) || speedKph > MAX_SEGMENT_SPEED_KPH) {
-          continue;
-        }
-
-        const serviceDayClass = toServiceDayClass(fromTime);
-        const bucketStartMinute = toBucketStartMinute(fromTime);
-        const key = [
-          mapping.routePatternId,
-          from.sequence,
-          to.sequence,
-          serviceDayClass,
-          bucketStartMinute,
-        ].join(":");
-
-        const aggregate = aggregates.get(key) ?? {
-          routePatternId: mapping.routePatternId,
-          fromSequence: from.sequence,
-          toSequence: to.sequence,
-          serviceDayClass,
-          bucketStartMinute,
-          segmentDistanceMeters,
-          durationsSec: [],
-        };
-        aggregate.durationsSec.push(durationSec);
-        aggregates.set(key, aggregate);
       }
     }
   }
@@ -431,6 +412,7 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
       }
 
       if (aggregate.durationsSec.length < MIN_SEGMENT_SAMPLE_COUNT) {
+        diagnostics.segmentBucketBelowSampleCount += 1;
         return null;
       }
 
@@ -544,7 +526,7 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
 
   return {
     processedCount: mappings.length,
-    successCount: segmentRows.length + turnRows.length,
+    successCount: segmentRows.length + turnRows.length + observedStopPassageInsertCount,
     failureCount: 0,
     meta: {
       lookbackDays: SEGMENT_WINDOW_DAYS,
@@ -553,6 +535,8 @@ export async function runSegmentProfilesJob(runtime: WorkerRuntime): Promise<Job
       turnProfileCount: turnRows.length,
       observedStopPassageCount: observedStopPassageInsertCount,
       minSegmentSampleCount: MIN_SEGMENT_SAMPLE_COUNT,
+      lowFrequencyTraceGapMinutes: LOW_FREQUENCY_TRACE_GAP_MS / 60_000,
+      ...diagnostics,
     },
   };
 }

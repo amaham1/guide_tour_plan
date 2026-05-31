@@ -109,6 +109,112 @@ describe("observed timetable derivation", () => {
     expect(result.skippedGapCount).toBe(1);
   });
 
+  it("partially fills reachable missing stops when the full anchor gap is not profiled yet", () => {
+    const result = buildObservedDerivedStopTimes(
+      [
+        { stopId: "stop-a", sequence: 1 },
+        { stopId: "stop-b", sequence: 2 },
+        { stopId: "stop-c", sequence: 3 },
+        { stopId: "stop-d", sequence: 4 },
+      ],
+      [
+        {
+          stopId: "stop-a",
+          sequence: 1,
+          arrivalMinutes: 480,
+          departureMinutes: 480,
+        },
+        {
+          stopId: "stop-d",
+          sequence: 4,
+          arrivalMinutes: 540,
+          departureMinutes: 540,
+        },
+      ],
+      [
+        {
+          fromSequence: 1,
+          toSequence: 2,
+          serviceDayClass: ServiceDayClass.WEEKDAY,
+          bucketStartMinute: 480,
+          medianDurationSec: 600,
+          p90DurationSec: 720,
+          sampleCount: 8,
+        },
+      ],
+    );
+
+    expect(result.rows).toEqual([
+      expect.objectContaining({
+        stopId: "stop-b",
+        sequence: 2,
+        arrivalMinutes: 490,
+        departureMinutes: 490,
+        sourceSampleCount: 8,
+        sourceBucketStartMinute: 480,
+      }),
+    ]);
+    expect(result.partiallyFilledGapCount).toBe(1);
+    expect(result.skippedGapCount).toBe(0);
+  });
+
+  it("uses nearby time buckets but ignores profiles that are too far from the trip time", () => {
+    const patternStops = [
+      { stopId: "stop-a", sequence: 1 },
+      { stopId: "stop-b", sequence: 2 },
+      { stopId: "stop-c", sequence: 3 },
+    ];
+    const officialStopTimes = [
+      {
+        stopId: "stop-a",
+        sequence: 1,
+        arrivalMinutes: 480,
+        departureMinutes: 480,
+      },
+      {
+        stopId: "stop-c",
+        sequence: 3,
+        arrivalMinutes: 540,
+        departureMinutes: 540,
+      },
+    ];
+
+    expect(
+      buildObservedDerivedStopTimes(patternStops, officialStopTimes, [
+        {
+          fromSequence: 1,
+          toSequence: 2,
+          serviceDayClass: ServiceDayClass.WEEKDAY,
+          bucketStartMinute: 540,
+          medianDurationSec: 600,
+          p90DurationSec: 720,
+          sampleCount: 8,
+        },
+      ]).rows,
+    ).toEqual([
+      expect.objectContaining({
+        stopId: "stop-b",
+        sequence: 2,
+        arrivalMinutes: 490,
+        sourceBucketStartMinute: 540,
+      }),
+    ]);
+
+    expect(
+      buildObservedDerivedStopTimes(patternStops, officialStopTimes, [
+        {
+          fromSequence: 1,
+          toSequence: 2,
+          serviceDayClass: ServiceDayClass.WEEKDAY,
+          bucketStartMinute: 615,
+          medianDurationSec: 600,
+          p90DurationSec: 720,
+          sampleCount: 8,
+        },
+      ]).rows,
+    ).toEqual([]);
+  });
+
   it("materializes SEGMENT_PROFILE rows without overwriting official anchors", async () => {
     const deleteMany = vi.fn().mockResolvedValue({ count: 1 });
     const createMany = vi.fn();
@@ -118,6 +224,7 @@ describe("observed timetable derivation", () => {
           findMany: vi.fn().mockResolvedValue([
             {
               id: "trip-1",
+              routePatternId: "pattern-1",
               stopTimes: [
                 {
                   stopId: "stop-a",
@@ -133,31 +240,7 @@ describe("observed timetable derivation", () => {
                 },
               ],
               routePattern: {
-                stops: [
-                  { stopId: "stop-a", sequence: 1 },
-                  { stopId: "stop-b", sequence: 2 },
-                  { stopId: "stop-c", sequence: 3 },
-                ],
-                segmentProfiles: [
-                  {
-                    fromSequence: 1,
-                    toSequence: 2,
-                    serviceDayClass: ServiceDayClass.WEEKDAY,
-                    bucketStartMinute: 480,
-                    medianDurationSec: 600,
-                    p90DurationSec: 720,
-                    sampleCount: 8,
-                  },
-                  {
-                    fromSequence: 2,
-                    toSequence: 3,
-                    serviceDayClass: ServiceDayClass.WEEKDAY,
-                    bucketStartMinute: 480,
-                    medianDurationSec: 1200,
-                    p90DurationSec: 1320,
-                    sampleCount: 9,
-                  },
-                ],
+                id: "pattern-1",
               },
             },
           ]),
@@ -167,7 +250,41 @@ describe("observed timetable derivation", () => {
           createMany,
         },
         routePattern: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              id: "pattern-1",
+              stops: [
+                { stopId: "stop-a", sequence: 1 },
+                { stopId: "stop-b", sequence: 2 },
+                { stopId: "stop-c", sequence: 3 },
+              ],
+            },
+          ]),
           count: vi.fn().mockResolvedValue(0),
+        },
+        segmentTravelProfile: {
+          findMany: vi.fn().mockResolvedValue([
+            {
+              routePatternId: "pattern-1",
+              fromSequence: 1,
+              toSequence: 2,
+              serviceDayClass: ServiceDayClass.WEEKDAY,
+              bucketStartMinute: 480,
+              medianDurationSec: 600,
+              p90DurationSec: 720,
+              sampleCount: 8,
+            },
+            {
+              routePatternId: "pattern-1",
+              fromSequence: 2,
+              toSequence: 3,
+              serviceDayClass: ServiceDayClass.WEEKDAY,
+              bucketStartMinute: 480,
+              medianDurationSec: 1200,
+              p90DurationSec: 1320,
+              sampleCount: 9,
+            },
+          ]),
         },
       },
     } as never;

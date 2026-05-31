@@ -141,6 +141,23 @@ process.on("SIGTERM", () => {
   void shutdown();
 });
 
+function explainStartupError(error) {
+  const message = error instanceof Error ? error.message : "unknown error";
+  if (
+    message.includes("dockerDesktopLinuxEngine") ||
+    message.includes("Cannot connect to the Docker daemon") ||
+    message.includes("The system cannot find the file specified")
+  ) {
+    return [
+      message,
+      "[observe] Docker Desktop is not reachable. Start Docker Desktop, wait until the engine is running, then run npm run observe again.",
+      "[observe] If you only want to collect raw GNSS without OSRM/profile generation, use npm run observe:no-osrm.",
+    ].join("\n");
+  }
+
+  return message;
+}
+
 async function main() {
   if (!shouldSkipOsrm) {
     const status = await ensureOsrmReady();
@@ -157,6 +174,6 @@ async function main() {
 }
 
 await main().catch((error) => {
-  console.error(`[observe] failed: ${error instanceof Error ? error.message : "unknown error"}`);
+  console.error(`[observe] failed: ${explainStartupError(error)}`);
   process.exit(1);
 });
